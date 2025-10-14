@@ -1,514 +1,796 @@
 # app/main.py
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import create_engine, text, inspect
-from sqlalchemy.engine import make_url, Connection
-from typing import Dict, Any, List, Optional, Tuple
-import re
-import os
-import httpx
+from __future__ import annotations
+import os, re, time, hashlib
+from uuid import uuid4
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlencode, quote
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Depends, Header
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+import httpx
 
-# ---------- .env ----------
-load_dotenv()
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
-DISABLE_AZURE_LLM = os.getenv("DISABLE_AZURE_LLM", "0") == "1"  # para debug local
+# SQLAlchemy (config DB)
+from sqlalchemy import (
+    create_engine,
+    text as sqltext,
+    bindparam,
+    String, Integer, Text, ForeignKey, JSON
+)
+from sqlalchemy.orm import (
+    DeclarativeBase, Mapped, mapped_column, relationship,
+    sessionmaker, Session
+)
+from sqlalchemy.engine import make_url, Connection
 
-app = FastAPI(title="NL→SQL (MySQL) - Multi-DB")
+# Criptografia
+from cryptography.fernet import Fernet, InvalidToken
 
-# ---------- Modelos ----------
-class Pergunta(BaseModel):
-    database_url: str   # pode vir COM ou SEM schema (ex.: mysql+pymysql://user:pass@host:3306?charset=utf8mb4)
-    pergunta: str
-    max_linhas: int = 100
 
-# ---------- Utils ----------
-_SYSTEM_SCHEMAS = {"information_schema", "mysql", "performance_schema", "sys"}
-_TEMP_DB_ORDER = ["information_schema", "mysql"]  # quando URL vem sem DB
+# =========================================
+# .env
+# =========================================
+DOTENV_PATH = (Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(dotenv_path=DOTENV_PATH, override=True)
 
-def _use_schema(conn: Connection, schema: str) -> None:
-    schema_quoted = f"`{schema.replace('`','')}`"
-    conn.execute(text(f"USE {schema_quoted}"))
+AZURE_OPENAI_ENDPOINT    = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
+AZURE_OPENAI_API_KEY     = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+AZURE_OPENAI_DEPLOYMENT  = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview").strip()
+DISABLE_AZURE_LLM        = os.getenv("DISABLE_AZURE_LLM", "0").strip() in {"1","true","True","YES","yes"}
 
-def _tokens(texto: str) -> List[str]:
-    return re.findall(r"[a-zA-Z0-9_]+", (texto or "").lower())
+CONFIG_DB_URL            = os.getenv("CONFIG_DB_URL", "mysql+pymysql://user:pass@127.0.0.1:3306/empresas?charset=utf8mb4").strip()
+FERNET_KEY_B64           = os.getenv("FERNET_KEY", "").strip()
+if not FERNET_KEY_B64:
+    raise RuntimeError("FERNET_KEY ausente no .env. Gere com: from cryptography.fernet import Fernet; Fernet.generate_key().decode()")
+fernet = Fernet(FERNET_KEY_B64.encode())
 
-def _parse_schema_override(pergunta: str) -> Optional[str]:
-    padroes = [
-        r"(?i)\bno\s+schema\s+([a-zA-Z0-9_]+)\s*:?",
-        r"(?i)\bschema\s+([a-zA-Z0-9_]+)\s*:?",
-        r"(?i)\buse\s+([a-zA-Z0-9_]+)\b",
-        r"(?i)\busar\s+([a-zA-Z0-9_]+)\b",
-        r"(?i)\bno\s+banco\s+([a-zA-Z0-9_]+)\b",
-    ]
-    for rx in padroes:
-        m = re.search(rx, pergunta or "")
-        if m:
-            return m.group(1)
-    return None
+def encrypt_str(s: str) -> str:
+    return fernet.encrypt(s.encode()).decode()
 
-def _schema_exists_on_conn(conn: Connection, schema: str) -> bool:
-    rows = conn.execute(text("SHOW DATABASES")).fetchall()
-    dbs = {r[0].lower() for r in rows}
-    return schema and schema.lower() in dbs and schema.lower() not in _SYSTEM_SCHEMAS
-
-# ---------- Catálogo multi-DB (tolerante a erros) ----------
-def _list_user_databases(conn: Connection) -> List[str]:
-    rows = conn.execute(text("SHOW DATABASES")).fetchall()
-    return sorted([r[0] for r in rows if r[0] not in _SYSTEM_SCHEMAS])
-
-def _reflect_schema_on_current_conn(conn: Connection) -> Dict[str, Any]:
-    """
-    Reflexão tolerante a erros por tabela.
-    Se uma tabela falhar, ela é registrada em 'errors' e ignorada no resumo.
-    """
-    insp = inspect(conn)
-    tabelas: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
-
+def decrypt_str(s: str) -> str:
     try:
-        table_names = insp.get_table_names()
-    except Exception as te:
-        raise HTTPException(status_code=400, detail=f"Falha ao listar tabelas: {te}")
+        return fernet.decrypt(s.encode()).decode()
+    except InvalidToken as e:
+        raise HTTPException(status_code=400, detail="Não foi possível decifrar a senha armazenada.") from e
 
-    for t in table_names:
-        try:
-            cols = insp.get_columns(t)
-            fks = []
-            try:
-                fks = insp.get_foreign_keys(t) or []
-            except Exception as fe:
-                errors.append({"table": t, "where": "get_foreign_keys", "error": str(fe)})
 
-            tabelas.append({
-                "tabela": t,
-                "colunas": [
-                    {"nome": c["name"], "tipo": str(c.get("type", "")), "pk": bool(c.get("primary_key", False))}
-                    for c in cols
-                ],
-                "fks": [
-                    {"coluna": ", ".join(fk.get("constrained_columns", [])), "ref": fk.get("referred_table")}
-                    for fk in fks
-                ]
-            })
-        except Exception as ce:
-            errors.append({"table": t, "where": "table_reflection", "error": str(ce)})
+app = FastAPI(title="NL→SQL Multi-Org (MySQL) + RBAC + Bootstrap")
 
-    return {"tabelas": tabelas, "errors": errors}
 
-def _catalog_all(conn: Connection, only_db: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Catálogo multi-DB tolerante a erros e NÃO intrusivo:
-    - Varre DBs de usuário; se algo falhar, registra e segue.
-    - Restaura o schema original ao final.
-    Estrutura:
-      {"databases": {db: {"tables": {tabela: {...| "error": msg}}, "error"?: msg}},
-       "errors": [...]}
-    """
-    catalog: Dict[str, Any] = {"databases": {}, "errors": []}
+# =========================================
+# ORM (banco de configuração)
+# =========================================
+class Base(DeclarativeBase):
+    pass
+
+class Org(Base):
+    __tablename__ = "orgs"
+    id: Mapped[str]     = mapped_column(String(36), primary_key=True)
+    name: Mapped[str]   = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20), default="active")
+
+    conn: Mapped["OrgDbConnection"] = relationship(back_populates="org", uselist=False, cascade="all, delete-orphan")
+    schemas: Mapped[List["OrgAllowedSchema"]] = relationship(back_populates="org", cascade="all, delete-orphan")
+    docs: Mapped[List["BizDocument"]] = relationship(back_populates="org", cascade="all, delete-orphan")
+    members: Mapped[List["OrgMember"]] = relationship(back_populates="org", cascade="all, delete-orphan")
+
+class OrgDbConnection(Base):
+    __tablename__ = "org_db_connections"
+    org_id: Mapped[str]        = mapped_column(String(36), ForeignKey("orgs.id"), primary_key=True)
+    driver: Mapped[str]        = mapped_column(String(40))
+    host: Mapped[str]          = mapped_column(String(255))
+    port: Mapped[int]          = mapped_column(Integer, default=3306)
+    username: Mapped[str]      = mapped_column(String(255))
+    password_enc: Mapped[str]  = mapped_column(Text)
+    database_name: Mapped[str] = mapped_column(String(255))
+    options_json: Mapped[dict] = mapped_column(JSON, default={})
+
+    org: Mapped[Org] = relationship(back_populates="conn")
+
+class OrgAllowedSchema(Base):
+    __tablename__ = "org_allowed_schemas"
+    org_id: Mapped[str]      = mapped_column(String(36), ForeignKey("orgs.id"), primary_key=True)
+    schema_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    org: Mapped[Org]         = relationship(back_populates="schemas")
+
+class BizDocument(Base):
+    __tablename__ = "biz_documents"
+    id: Mapped[int]            = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[str]        = mapped_column(String(36), ForeignKey("orgs.id"))
+    title: Mapped[str]         = mapped_column(String(255))
+    storage_url: Mapped[str]   = mapped_column(Text)
+    metadata_json: Mapped[dict]= mapped_column(JSON, default={})
+    org: Mapped[Org]           = relationship(back_populates="docs")
+
+class QueryAudit(Base):
+    __tablename__ = "query_audit"
+    id: Mapped[int]            = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[str]        = mapped_column(String(36))
+    schema_used: Mapped[str]   = mapped_column(String(255))
+    prompt_snip: Mapped[str]   = mapped_column(String(500))
+    sql_text: Mapped[str]      = mapped_column(Text)
+    row_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+# === RBAC ===
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str]        = mapped_column(String(36), primary_key=True)
+    name: Mapped[str]      = mapped_column(String(120))
+    email: Mapped[str]     = mapped_column(String(255), unique=True)
+    role: Mapped[str]      = mapped_column(String(10))  # 'admin' | 'user'
+    api_key_sha: Mapped[str] = mapped_column(String(64))  # sha256 da API key
+    org_links: Mapped[List["OrgMember"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+class OrgMember(Base):
+    __tablename__ = "org_members"
+    user_id: Mapped[str]   = mapped_column(String(36), ForeignKey("users.id"), primary_key=True)
+    org_id:  Mapped[str]   = mapped_column(String(36), ForeignKey("orgs.id"),  primary_key=True)
+    role_in_org: Mapped[str]= mapped_column(String(20), default="member")  # 'member'|'analyst'|'admin_org' etc.
+
+    user: Mapped[User] = relationship(back_populates="org_links")
+    org:  Mapped[Org]  = relationship(back_populates="members")
+
+
+engine_cfg = create_engine(CONFIG_DB_URL, pool_pre_ping=True, future=True)
+SessionCfg = sessionmaker(bind=engine_cfg, autoflush=False, autocommit=False, future=True)
+
+def sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()
+
+@app.on_event("startup")
+def _startup():
+    Base.metadata.create_all(engine_cfg)
+    # Seed opcional de superadmin via .env (útil para operar admin antes do bootstrap)
+    sa_name  = os.getenv("SUPERADMIN_NAME", "").strip()
+    sa_email = os.getenv("SUPERADMIN_EMAIL", "").strip()
+    sa_key   = os.getenv("SUPERADMIN_API_KEY", "").strip()
+    if sa_email and sa_key:
+        with SessionCfg() as s:
+            exists = s.query(User).filter_by(email=sa_email).one_or_none()
+            if not exists:
+                s.add(User(
+                    id=uuid4().hex[:12],
+                    name=sa_name or "Super Admin",
+                    email=sa_email,
+                    role="admin",
+                    api_key_sha=sha256_hex(sa_key)
+                ))
+                s.commit()
+
+
+# =========================================
+# Utilitários (URL de DB do cliente)
+# =========================================
+def parse_database_url(url_str: str) -> dict:
     try:
-        current_db = conn.execute(text("SELECT DATABASE()")).scalar()
+        u = make_url(url_str)
     except Exception:
-        current_db = None
+        raise HTTPException(status_code=400, detail="database_url inválida.")
+    if not u.database:
+        raise HTTPException(status_code=400, detail="A database_url deve incluir um DB/schema (ex.: ...:3306/sakila?charset=utf8mb4).")
+    return {
+        "driver": u.drivername,
+        "host": u.host or "127.0.0.1",
+        "port": int(u.port or 3306),
+        "username": u.username or "",
+        "password": u.password or "",
+        "database_name": u.database,
+        "options": dict(u.query or {}),
+    }
 
-    try:
-        dbs = _list_user_databases(conn)
-        if only_db:
-            dbs = [d for d in dbs if d.lower() == only_db.lower()]
+def build_sqlalchemy_url(driver: str, host: str, port: int, username: str,
+                         password_plain: str, database: str, options: Optional[dict]) -> str:
+    pwd_enc = quote(password_plain, safe="")
+    qs = "?" + urlencode(options or {}) if options else ""
+    return f"{driver}://{username}:{pwd_enc}@{host}:{port}/{database}{qs}"
 
-        for db in dbs:
-            db_entry: Dict[str, Any] = {"tables": {}}
-            catalog["databases"][db] = db_entry
-            try:
-                _use_schema(conn, db)
-                insp = inspect(conn)
-                try:
-                    table_names = insp.get_table_names()
-                except Exception as te:
-                    db_entry["error"] = f"Falha ao listar tabelas: {te}"
-                    catalog["errors"].append({"db": db, "where": "get_table_names", "error": str(te)})
-                    continue
 
-                for t in table_names:
-                    try:
-                        cols = insp.get_columns(t)
-                        pks = {c["name"] for c in cols if c.get("primary_key", False)}
-                        try:
-                            fks = insp.get_foreign_keys(t) or []
-                        except Exception as fe:
-                            fks = []
-                            catalog["errors"].append({"db": db, "table": t, "where": "get_foreign_keys", "error": str(fe)})
-
-                        db_entry["tables"][t] = {
-                            "columns": [
-                                {"name": c.get("name"), "type": str(c.get("type", "")), "is_pk": c.get("name") in pks}
-                                for c in cols
-                            ],
-                            "fks": [
-                                {
-                                    "columns": fk.get("constrained_columns", []),
-                                    "referred_table": fk.get("referred_table"),
-                                    "referred_schema": db,
-                                } for fk in fks
-                            ],
-                        }
-                    except Exception as ce:
-                        db_entry["tables"][t] = {"error": str(ce)}
-                        catalog["errors"].append({"db": db, "table": t, "where": "table_reflection", "error": str(ce)})
-            except Exception as de:
-                db_entry["error"] = str(de)
-                catalog["errors"].append({"db": db, "where": "db_reflection", "error": str(de)})
-                continue
-    finally:
-        # restaura o schema original (se havia)
-        if current_db:
-            try:
-                _use_schema(conn, current_db)
-            except Exception:
-                pass
-
-    return catalog
-
-# ---------- Extração de esquema (URL com/sem DB) ----------
-def extrair_esquema_direct(database_url_com_db: str) -> Dict[str, Any]:
-    engine = create_engine(database_url_com_db, pool_pre_ping=True)
-    with engine.connect() as conn:
-        return _reflect_schema_on_current_conn(conn)
-
-def extrair_esquema_via_use(database_url_base: str, schema: str) -> Dict[str, Any]:
-    base = make_url(database_url_base)
-    last_err = None
-    for temp_db in _TEMP_DB_ORDER:
-        try:
-            url_temp = str(base.set(database=temp_db))
-            engine = create_engine(url_temp, pool_pre_ping=True)
-            with engine.connect() as conn:
-                _use_schema(conn, schema)
-                return _reflect_schema_on_current_conn(conn)
-        except Exception as e:
-            last_err = e
-            continue
-    raise HTTPException(status_code=400, detail=str(last_err))
-
-def listar_schemas_usuario(database_url_base: str) -> List[str]:
-    base = make_url(database_url_base)
-    last_err = None
-    for temp_db in _TEMP_DB_ORDER:
-        try:
-            url_temp = str(base.set(database=temp_db))
-            engine = create_engine(url_temp, pool_pre_ping=True)
-            with engine.connect() as conn:
-                return _list_user_databases(conn)
-        except Exception as e:
-            last_err = e
-            continue
-    raise HTTPException(status_code=400, detail=str(last_err))
-
-def escolher_schema_por_prompt(database_url: str, pergunta: str) -> str:
-    override = _parse_schema_override(pergunta)
-    schemas = listar_schemas_usuario(database_url)
-    if override and any(s.lower() == override.lower() for s in schemas):
-        return next(s for s in schemas if s.lower() == override.lower())
-
-    toks = set(_tokens(pergunta))
-    matches = [s for s in schemas if s.lower() in toks]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        return sorted(matches)[0]
-    if any(s.lower() == "sakila" for s in schemas):
-        return next(s for s in schemas if s.lower() == "sakila")
-    return schemas[0]
-
-def resumir_esquema(esquema: Dict[str, Any], max_chars: int = 4000) -> str:
-    linhas: List[str] = []
-    for t in esquema["tabelas"]:
-        cols = ", ".join([f'{c["nome"]}:{c["tipo"]}' for c in t["colunas"]][:24])
-        linhas.append(f'- {t["tabela"]}({cols})')
-    texto = "Esquema disponível:\n" + "\n".join(linhas)
-    return texto[:max_chars]
-
-# ---------- Prompt / NL→SQL ----------
-PROMPT_BASE = """Você é um tradutor NL→SQL. Regras:
-- Use apenas tabelas e colunas do esquema.
-- Prefira JOINs explícitos por chaves declaradas.
-- NUNCA modifique dados (somente SELECT).
-- Sempre inclua LIMIT {limit} se não houver.
-- Use nomes qualificados quando necessário.
-- Dialeto alvo: MySQL.
-{esquema}
-
-Pergunta do usuário:
-{pergunta}
-
-Responda SOMENTE com o SQL válido (sem explicações)."""
-
+# =========================================
+# NL→SQL (Azure OpenAI) + fallback
+# =========================================
 SYSTEM_PROMPT_TEMPLATE = """Você é um tradutor NL→SQL no dialeto {dialeto}. Regras obrigatórias:
 - Gere SOMENTE um SELECT SQL válido (sem comentários, sem ```).
 - Use apenas tabelas/colunas do esquema fornecido.
 - Prefira JOINs com PK/FK explícitas.
 - NUNCA modifique dados (sem INSERT/UPDATE/DELETE/DDL).
 - Se o usuário não pedir limite explícito, inclua LIMIT {limit}.
-- Formate datas e funções para {dialeto} (MySQL).
-- Evite CTEs desnecessárias.
+- Dialeto alvo: {dialeto}.
 """
 
+PROMPT_BASE = """{esquema}
+
+Pergunta do usuário:
+{pergunta}
+
+Responda SOMENTE com o SQL válido (sem explicações)."""
+
 def _azure_chat_url() -> str:
-    if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT and AZURE_OPENAI_API_KEY):
-        raise RuntimeError("Faltam variáveis AZURE_OPENAI_* no .env")
     return f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
 
 def chamar_llm_azure(prompt_usuario: str, limit: int = 100, dialeto: str = "MySQL") -> str:
-    if DISABLE_AZURE_LLM:
-        return f"SELECT 1 AS ok LIMIT {limit}"
+    if DISABLE_AZURE_LLM or not AZURE_OPENAI_API_KEY or not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_DEPLOYMENT:
+        return f"SELECT 1 AS ok LIMIT {limit};"
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(dialeto=dialeto, limit=limit)
-    payload = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt_usuario}
-        ],
-        "temperature": 0.1,
-        "max_tokens": 800,
-        "top_p": 0.95
-    }
-    headers = {"Content-Type": "application/json", "api-key": AZURE_OPENAI_API_KEY}
+    payload = {"messages":[{"role":"system","content":system_prompt},{"role":"user","content":prompt_usuario}],
+               "temperature":0.1, "max_tokens":800, "top_p":0.95}
+    headers = {"Content-Type":"application/json","api-key":AZURE_OPENAI_API_KEY}
     url = _azure_chat_url()
-    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-        resp = client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
     try:
-        content = data["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise RuntimeError(f"Resposta inesperada do Azure OpenAI: {data}") from e
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.lower().startswith("sql"):
-            content = content[3:].lstrip()
-    return content.strip()
+        with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            r = client.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = content.strip("`")
+            if content.lower().startswith("sql"):
+                content = content[3:].lstrip()
+        return content.strip()
+    except Exception:
+        return f"SELECT 1 AS ok LIMIT {limit};"
 
-def gerar_sql(pergunta: str, esquema_texto: str, limit: int) -> str:
-    prompt = PROMPT_BASE.format(esquema=esquema_texto, pergunta=pergunta, limit=limit)
-    sql_sugerido = chamar_llm_azure(prompt, limit=limit, dialeto="MySQL")
-    return sql_sugerido.strip()
 
-# ---------- Segurança / Validação ----------
-SQL_PERIGOSO = re.compile(r"\b(INSERT|UPDATE|DELETE|MERGE|ALTER|DROP|CREATE|TRUNCATE|GRANT|REVOKE)\b", re.IGNORECASE)
+# =========================================
+# Reflection / Catálogo (DB atual)
+# =========================================
+def _catalog_for_current_db(conn: Connection, db_name: str) -> Dict[str, Any]:
+    tables: Dict[str, Any] = {}
 
-def proteger_sql_multidb(sql: str, catalog: Dict[str, Any], default_db: str, max_linhas: int, conn: Connection) -> str:
-    """
-    - Bloqueia DDL/DML.
-    - Valida referências FROM/JOIN no modo multi-DB.
-    - Se a tabela não estiver no catálogo, confirma no information_schema.
-    """
+    cols = conn.execute(sqltext("""
+        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_KEY
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = :db
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+    """), {"db": db_name}).mappings()
+    for row in cols:
+        t = row["TABLE_NAME"]
+        tables.setdefault(t, {"columns": [], "pks": set(), "fks": []})
+        tables[t]["columns"].append({"name": row["COLUMN_NAME"], "type": row["DATA_TYPE"]})
+        if row["COLUMN_KEY"] == "PRI":
+            tables[t]["pks"].add(row["COLUMN_NAME"])
+
+    fks = conn.execute(sqltext("""
+        SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = :db AND REFERENCED_TABLE_NAME IS NOT NULL
+        ORDER BY TABLE_NAME, COLUMN_NAME
+    """), {"db": db_name}).mappings()
+    for row in fks:
+        t = row["TABLE_NAME"]
+        tables.setdefault(t, {"columns": [], "pks": set(), "fks": []})
+        tables[t]["fks"].append({
+            "col": row["COLUMN_NAME"],
+            "ref_table": row["REFERENCED_TABLE_NAME"],
+            "ref_col": row["REFERENCED_COLUMN_NAME"]
+        })
+
+    return {"db": db_name, "tables": tables}
+
+def _esquema_resumido(catalog: Dict[str, Any], max_chars: int = 4000) -> str:
+    linhas: List[str] = []
+    for t, meta in catalog["tables"].items():
+        cols = ", ".join([f'{c["name"]}:{c["type"]}' for c in meta["columns"]][:24])
+        linhas.append(f"- {t}({cols})")
+    texto = "Esquema disponível:\n" + "\n".join(linhas)
+    return texto[:max_chars]
+
+
+# =========================================
+# Guardrails
+# =========================================
+SQL_PERIGOSO = re.compile(r"\b(INSERT|UPDATE|DELETE|MERGE|ALTER|DROP|CREATE|TRUNCATE|GRANT|REVOKE)\b", re.I)
+
+def proteger_sql_singledb(sql: str, catalog: Dict[str, Any], db_name: str, max_linhas: int) -> str:
     if SQL_PERIGOSO.search(sql):
-        raise ValueError("SQL com comandos de escrita/DDL não é permitido.")
+        raise HTTPException(status_code=400, detail="SQL com comandos de escrita/DDL não é permitido.")
 
-    # after FROM/JOIN: (db?.table)
-    refs = re.findall(
-        r'(?:from|join)\s+((?:[`"]?[a-zA-Z0-9_]+[`"]?\.)?[`"]?[a-zA-Z0-9_]+[`"]?)',
-        sql, flags=re.IGNORECASE
-    )
+    refs = re.findall(r'(?:from|join)\s+((?:[`"]?[a-zA-Z0-9_]+[`"]?\.)?[`"]?[a-zA-Z0-9_]+[`"]?)', sql, flags=re.I)
 
-    def split_ref(r: str) -> Tuple[str, str]:
+    def split_ref(r: str) -> Tuple[Optional[str], str]:
         r = r.strip('`"')
         parts = r.split(".")
         if len(parts) == 2:
-            return parts[0], parts[1]
-        return default_db, parts[0]
+            return parts[0].lower(), parts[1].lower()
+        return None, parts[0].lower()
 
-    # 1) checa no catálogo
-    unknown: List[Tuple[str, str]] = []
-    dbs = catalog.get("databases", {})
-    for r in refs:
-        db, tbl = split_ref(r)
-        if db not in dbs or tbl not in dbs.get(db, {}).get("tables", {}):
-            unknown.append((db, tbl))
+    other_dbs: Set[str] = set()
+    tables_used: Set[str] = set()
+    for ref in refs:
+        db, tb = split_ref(ref)
+        if db and db != db_name.lower():
+            other_dbs.add(db)
+        tables_used.add(tb)
 
-    # 2) fallback: confirma no information_schema
+    if other_dbs:
+        raise HTTPException(status_code=400, detail=f"Tabelas desconhecidas (multi-DB não permitido): {other_dbs}")
+
+    known = {k.lower() for k in catalog["tables"].keys()}
+    unknown = {t for t in tables_used if t not in known}
     if unknown:
-        clauses = []
-        params = {}
-        for i, (db, tbl) in enumerate(unknown):
-            clauses.append(f"(table_schema = :db{i} AND table_name = :tb{i})")
-            params[f"db{i}"] = db
-            params[f"tb{i}"] = tbl
+        raise HTTPException(status_code=400, detail=f"Tabela(s) não encontrada(s) em {db_name}: {unknown}")
 
-        q = text(f"""
-            SELECT table_schema, table_name
-            FROM information_schema.tables
-            WHERE {" OR ".join(clauses)}
-        """)
-        found = {(row[0], row[1]) for row in conn.execute(q, params).fetchall()}
-
-        still_unknown = {(db, tbl) for (db, tbl) in unknown if (db, tbl) not in found}
-        if still_unknown:
-            raise ValueError(f"Tabelas desconhecidas (multi-DB): { {f'{db}.{tbl}' for db, tbl in still_unknown} }")
-
-    # 3) garante LIMIT
-    if re.search(r"\blimit\b", sql, flags=re.IGNORECASE) is None:
+    if re.search(r"\blimit\b", sql, flags=re.I) is None:
         sql += f"\nLIMIT {max_linhas}"
+    if not sql.strip().endswith(";"):
+        sql += ";"
     return sql
 
-# ---------- Execução ----------
+
+# =========================================
+# Execução
+# =========================================
 def executar_sql_readonly_on_conn(conn: Connection, sql: str) -> Dict[str, Any]:
-    rs = conn.execute(text(sql))
+    rs = conn.execute(sqltext(sql))
     cols = list(rs.keys())
     dados = [dict(zip(cols, row)) for row in rs]
     return {"colunas": cols, "dados": dados}
 
-def executar_sql_readonly_direct(database_url_com_db: str, sql: str) -> Dict[str, Any]:
-    engine = create_engine(database_url_com_db, pool_pre_ping=True)
-    with engine.connect() as conn:
-        return executar_sql_readonly_on_conn(conn, sql)
 
-# ---------- Endpoints ----------
-@app.post("/perguntar")
-def perguntar(p: Pergunta):
+# =========================================
+# Schemas (requests)
+# =========================================
+class AdminOrgCreate(BaseModel):
+    name: str = Field(..., examples=["Empresa X"])
+    database_url: str = Field(..., description="SQLAlchemy URL com DB (schema) obrigatório")
+    allowed_schemas: List[str] = Field(..., min_items=1)
+    documents: List[Dict[str, Any]] = Field(default_factory=list)
+
+class AdminOrgResponse(BaseModel):
+    org_id: str
+    name: str
+    allowed_schemas: List[str]
+
+class AdminUserCreate(BaseModel):
+    name: str
+    email: str
+    role: str = Field(..., pattern="^(admin|user)$")
+    api_key_plain: str = Field(..., min_length=16)
+
+class AdminUserResponse(BaseModel):
+    user_id: str
+    name: str
+    email: str
+    role: str
+
+class AdminOrgMemberAdd(BaseModel):
+    user_id: str
+    role_in_org: str = "member"
+
+class PerguntaOrg(BaseModel):
+    org_id: str
+    pergunta: str
+    max_linhas: int = 100
+
+class PerguntaDireta(BaseModel):
+    database_url: str
+    pergunta: str
+    max_linhas: int = 100
+
+
+# =========================================
+# Auth dependencies
+# =========================================
+class AuthedUser(BaseModel):
+    id: str
+    email: str
+    role: str
+
+def get_db():
+    with SessionCfg() as s:
+        yield s
+
+def auth_required(x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+                  db: Session = Depends(get_db)) -> AuthedUser:
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="X-API-Key ausente.")
+    user = db.query(User).filter_by(api_key_sha=sha256_hex(x_api_key)).one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="API Key inválida.")
+    return AuthedUser(id=user.id, email=user.email, role=user.role)
+
+def require_admin(user: AuthedUser = Depends(auth_required)) -> AuthedUser:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a admin.")
+    return user
+
+def require_user_or_admin(user: AuthedUser = Depends(auth_required)) -> AuthedUser:
+    if user.role not in ("admin", "user"):
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+    return user
+
+def require_org_access(org_id: str, user: AuthedUser, db: Session) -> None:
+    if user.role == "admin":
+        return
+    link = db.query(OrgMember).filter_by(user_id=user.id, org_id=org_id).first()
+    if not link:
+        raise HTTPException(status_code=403, detail="Sem acesso a esta organização.")
+
+
+# =========================================
+# Endpoints ADMIN (protegidos)
+# =========================================
+@app.post("/admin/orgs", response_model=AdminOrgResponse)
+def admin_create_org(payload: AdminOrgCreate, _u: AuthedUser = Depends(require_admin)):
     try:
-        url = make_url(p.database_url)
+        parts = parse_database_url(payload.database_url)
+        if not parts["username"] or not parts["password"]:
+            raise HTTPException(status_code=400, detail="database_url deve conter usuário e senha.")
 
-        # ===== Caminho 1: URL já vem com DB (p.ex. /xtremo) — com override via prompt =====
-        if url.database:
-            engine = create_engine(p.database_url, pool_pre_ping=True)
-            with engine.connect() as conn:
-                override = _parse_schema_override(p.pergunta)
-                if override and override.lower() != url.database.lower():
-                    if not _schema_exists_on_conn(conn, override):
-                        raise HTTPException(status_code=400, detail=f"Schema '{override}' não existe neste servidor MySQL.")
-                    _use_schema(conn, override)
-                    schema_final = override
-                    modo = "direto_com_db_override_use"
-                else:
-                    schema_final = url.database
-                    _use_schema(conn, schema_final)  # garante
-                    modo = "direto_com_db"
+        org_id = uuid4().hex[:12]
+        with SessionCfg() as db:
+            org = Org(id=org_id, name=payload.name, status="active")
+            db.add(org)
+            db.add(OrgDbConnection(
+                org_id=org_id,
+                driver=parts["driver"], host=parts["host"], port=parts["port"],
+                username=parts["username"], password_enc=encrypt_str(parts["password"]),
+                database_name=parts["database_name"], options_json=parts["options"]
+            ))
+            for s in payload.allowed_schemas:
+                db.add(OrgAllowedSchema(org_id=org_id, schema_name=s))
+            for d in payload.documents:
+                db.add(BizDocument(
+                    org_id=org_id, title=d["title"], storage_url=d["storage_url"],
+                    metadata_json=d.get("metadata_json", {})
+                ))
+            db.commit()
+        return AdminOrgResponse(org_id=org_id, name=payload.name, allowed_schemas=payload.allowed_schemas)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-                # catálogo de TODOS os DBs (permite referencias db.tabela)
-                catalog = _catalog_all(conn)
+@app.get("/admin/orgs/{org_id}", response_model=AdminOrgResponse)
+def admin_get_org(org_id: str, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        org = db.get(Org, org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="org_id não encontrado.")
+        schemas = [s.schema_name for s in org.schemas]
+        return AdminOrgResponse(org_id=org.id, name=org.name, allowed_schemas=schemas)
 
-                # 🔒 garante schema correto após catalogar
-                _use_schema(conn, schema_final)
+@app.post("/admin/orgs/{org_id}/test-connection")
+def admin_test_connection(org_id: str, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        org = db.get(Org, org_id)
+        if not (org and org.conn):
+            raise HTTPException(status_code=404, detail="org_id não encontrado.")
+        pwd = decrypt_str(org.conn.password_enc)
+        db_url = build_sqlalchemy_url(
+            org.conn.driver, org.conn.host, org.conn.port,
+            org.conn.username, pwd, org.conn.database_name, org.conn.options_json
+        )
+    eng = create_engine(db_url, pool_pre_ping=True, future=True)
+    try:
+        with eng.connect() as c:
+            cur = c.execute(sqltext("SELECT DATABASE()")).scalar()
+            one = c.execute(sqltext("SELECT 1")).scalar()
+        return {"ok": True, "database_corrente": cur, "select_1": one}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-                # reflection/resumo no schema em uso (tolerante)
-                esquema = _reflect_schema_on_current_conn(conn)
-                esquema_txt = resumir_esquema(esquema)
+# --- Users (admin) ---
+@app.post("/admin/users", response_model=AdminUserResponse)
+def admin_create_user(payload: AdminUserCreate, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        if db.query(User).filter_by(email=payload.email).one_or_none():
+            raise HTTPException(status_code=400, detail="Email já cadastrado.")
+        user = User(
+            id=uuid4().hex[:12],
+            name=payload.name,
+            email=payload.email,
+            role=payload.role,
+            api_key_sha=sha256_hex(payload.api_key_plain),
+        )
+        db.add(user)
+        db.commit()
+        return AdminUserResponse(user_id=user.id, name=user.name, email=user.email, role=user.role)
 
-                # LLM → SQL
-                sql = gerar_sql(p.pergunta, esquema_txt, p.max_linhas)
-
-                # guard-rails multi-DB (com fallback no information_schema)
-                sql_seguro = proteger_sql_multidb(sql, catalog, default_db=schema_final, max_linhas=p.max_linhas, conn=conn)
-
-                # execução (com 1 correção automática)
-                try:
-                    resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
-                except Exception as err:
-                    corre_prompt = f"Esquema:\n{esquema_txt}\n\nErro:\n{err}\n\nCorrija o SQL (somente SELECT, LIMIT {p.max_linhas} se faltar):\n{sql_seguro}"
-                    sql_corrigido = chamar_llm_azure(corre_prompt, limit=p.max_linhas, dialeto="MySQL").strip()
-                    sql_seguro = proteger_sql_multidb(sql_corrigido, catalog, default_db=schema_final, max_linhas=p.max_linhas, conn=conn)
-                    _use_schema(conn, schema_final)
-                    resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
-
-                return {"schema_usado": schema_final, "modo_conexao": modo, "sql": sql_seguro, "resultado": resultado}
-
-        # ===== Caminho 2: URL sem DB — conecta em neutro, dá USE <schema> =====
+@app.post("/admin/orgs/{org_id}/members")
+def admin_add_member(org_id: str, payload: AdminOrgMemberAdd, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        org = db.get(Org, org_id)
+        user = db.get(User, payload.user_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="org não encontrada.")
+        if not user:
+            raise HTTPException(status_code=404, detail="user não encontrado.")
+        link = db.query(OrgMember).filter_by(org_id=org_id, user_id=user.id).one_or_none()
+        if link:
+            link.role_in_org = payload.role_in_org
         else:
-            base = make_url(p.database_url)
-            last_err = None
-            for temp_db in _TEMP_DB_ORDER:
-                try:
-                    url_temp = str(base.set(database=temp_db))
-                    engine = create_engine(url_temp, pool_pre_ping=True)
-                    with engine.connect() as conn:
-                        schema_escolhido = escolher_schema_por_prompt(p.database_url, p.pergunta)
-                        _use_schema(conn, schema_escolhido)
+            db.add(OrgMember(user_id=user.id, org_id=org_id, role_in_org=payload.role_in_org))
+        db.commit()
+        return {"ok": True, "org_id": org_id, "user_id": user.id, "role_in_org": payload.role_in_org}
 
-                        # catálogo multi-DB
-                        catalog = _catalog_all(conn)
 
-                        # 🔒 garante schema correto após catalogar
-                        _use_schema(conn, schema_escolhido)
+# =========================================
+# Roteamento automático de schema (índice + LLM classificador)
+# =========================================
+_SCHEMA_INDEX_CACHE: dict[str, dict[str, set[str]]] = {}
+_SCHEMA_INDEX_TTL: dict[str, float] = {}
+_SCHEMA_INDEX_MAX_AGE = 300.0  # 5 min
 
-                        # reflection/resumo no schema escolhido (tolerante)
-                        esquema = _reflect_schema_on_current_conn(conn)
-                        esquema_txt = resumir_esquema(esquema)
+def _normalize_tokens(*parts: str) -> set[str]:
+    toks: set[str] = set()
+    for p in parts:
+        for t in re.findall(r"[a-zA-Z0-9_]+", (p or "").lower()):
+            toks.add(t)
+    return toks
 
-                        # LLM → SQL
-                        sql = gerar_sql(p.pergunta, esquema_txt, p.max_linhas)
+def build_schema_index(conn: Connection, allowed_schemas: list[str]) -> dict[str, set[str]]:
+    rows = conn.execute(
+        sqltext("""
+            SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA IN :schemas
+        """).bindparams(bindparam("schemas", expanding=True)),
+        {"schemas": allowed_schemas}
+    ).fetchall()
 
-                        # guard-rails multi-DB (com fallback no information_schema)
-                        sql_seguro = proteger_sql_multidb(sql, catalog, default_db=schema_escolhido, max_linhas=p.max_linhas, conn=conn)
+    index: dict[str, set[str]] = {s: set() for s in allowed_schemas}
+    for schema, table, col in rows:
+        index[schema].add((table or "").lower())
+        index[schema].add((col or "").lower())
+    return index
 
-                        # execução (com 1 correção automática)
-                        try:
-                            resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
-                        except Exception as err:
-                            corre_prompt = f"Esquema:\n{esquema_txt}\n\nErro:\n{err}\n\nCorrija o SQL (somente SELECT, LIMIT {p.max_linhas} se faltar):\n{sql_seguro}"
-                            sql_corrigido = chamar_llm_azure(corre_prompt, limit=p.max_linhas, dialeto="MySQL").strip()
-                            sql_seguro = proteger_sql_multidb(sql_corrigido, catalog, default_db=schema_escolhido, max_linhas=p.max_linhas, conn=conn)
-                            _use_schema(conn, schema_escolhido)
-                            resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
+def get_schema_index_for_org(org_id: str, base_db_url_with_default: str, allowed: list[str]) -> dict[str, set[str]]:
+    now = time.time()
+    if (org_id in _SCHEMA_INDEX_CACHE) and (now - _SCHEMA_INDEX_TTL.get(org_id, 0) < _SCHEMA_INDEX_MAX_AGE):
+        return _SCHEMA_INDEX_CACHE[org_id]
+    eng = create_engine(base_db_url_with_default, pool_pre_ping=True, future=True)
+    with eng.connect() as conn:
+        idx = build_schema_index(conn, allowed)
+    _SCHEMA_INDEX_CACHE[org_id] = idx
+    _SCHEMA_INDEX_TTL[org_id] = now
+    return idx
 
-                        return {"schema_usado": schema_escolhido, "modo_conexao": f"sem_db_com_use({temp_db})", "sql": sql_seguro, "resultado": resultado}
-                except Exception as e:
-                    last_err = e
-                    continue
-            raise HTTPException(status_code=400, detail=str(last_err))
+def rank_schemas_by_overlap(schema_index: dict[str, set[str]], pergunta: str) -> list[tuple[str, int]]:
+    q_toks = _normalize_tokens(pergunta)
+    scored: list[tuple[str, int]] = []
+    for schema, tokens in schema_index.items():
+        score = len(q_toks & tokens)
+        scored.append((schema, score))
+    scored.sort(key=lambda x: (-x[1], x[0].lower()))
+    return scored
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# ---------- Diagnóstico ----------
-@app.post("/_debug_connect")
-def _debug_connect(p: Pergunta):
+def ask_llm_pick_schema(allowed: list[str], pergunta: str) -> Optional[str]:
+    if DISABLE_AZURE_LLM or not AZURE_OPENAI_API_KEY or not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_DEPLOYMENT:
+        return None
+    system = "Você escolhe UM schema dentre os permitidos. Responda com uma única palavra (nome exato), sem explicações."
+    user = f"Schemas permitidos: {', '.join(allowed)}\nPergunta: {pergunta}\nResponda apenas com o schema."
+    payload = {"messages":[{"role":"system","content":system},{"role":"user","content":user}],
+               "temperature":0.0, "max_tokens":10}
+    headers = {"Content-Type":"application/json","api-key":AZURE_OPENAI_API_KEY}
+    url = _azure_chat_url()
     try:
-        engine = create_engine(p.database_url, pool_pre_ping=True)
-        with engine.connect() as conn:
-            current = conn.execute(text("SELECT DATABASE()")).scalar()
-            dbs = [r[0] for r in conn.execute(text("SHOW DATABASES"))]
-            one = conn.execute(text("SELECT 1")).scalar()
-        return {"ok": True, "database_corrente": current, "databases": dbs, "select_1": one}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as cli:
+            r = cli.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        choice = data["choices"][0]["message"]["content"].strip()
+        cand = re.findall(r"[a-zA-Z0-9_]+", choice)
+        if not cand: return None
+        name = cand[0].lower()
+        for s in allowed:
+            if s.lower() == name:
+                return s
+        return None
+    except Exception:
+        return None
 
-@app.post("/_catalog")
-def post_catalog(p: Pergunta):
-    """
-    Gera catálogo multi-DB tolerante a erros.
-    Body JSON:
-      { "database_url": "...", "pergunta": "ping" }
-    Opcional: limitar a um DB citando no prompt: "schema X:" (apenas filtro do catálogo).
-    """
+
+# =========================================
+# Endpoint principal (usuário final)
+# =========================================
+@app.post("/perguntar_org")
+def perguntar_org(p: PerguntaOrg,
+                  u: AuthedUser = Depends(require_user_or_admin),
+                  db: Session = Depends(get_db)):
     try:
-        # 1) tenta usar a URL como está
-        try:
-            engine = create_engine(p.database_url, pool_pre_ping=True)
-            with engine.connect() as conn:
-                only_db = _parse_schema_override(p.pergunta)
-                return _catalog_all(conn, only_db=only_db)
-        except Exception as first_err:
-            # 2) se falhou (ex.: URL sem DB), tenta via DBs neutros
+        # autorização por organização
+        require_org_access(p.org_id, u, db)
+
+        # 1) Carrega config da org
+        with SessionCfg() as s:
+            org = s.get(Org, p.org_id)
+            if not (org and org.conn):
+                raise HTTPException(status_code=404, detail="org_id inválido.")
+            allowed = [x.schema_name for x in org.schemas]
+            if not allowed:
+                raise HTTPException(status_code=400, detail="Org sem schemas permitidos.")
+
+            pwd = decrypt_str(org.conn.password_enc)
+            base_parts = (org.conn.driver, org.conn.host, org.conn.port, org.conn.username, pwd, org.conn.options_json)
+
+        # 2) Router automático de schema
+        base_url_default_db = build_sqlalchemy_url(
+            base_parts[0], base_parts[1], base_parts[2], base_parts[3], base_parts[4],
+            org.conn.database_name, base_parts[5]
+        )
+        schema_index = get_schema_index_for_org(p.org_id, base_url_default_db, allowed)
+        ranked = rank_schemas_by_overlap(schema_index, p.pergunta)
+        best_by_overlap, top_score = ranked[0]
+        top_ties = [s for s, sc in ranked if sc == top_score]
+        if top_score == 0 or len(top_ties) > 1:
+            picked = ask_llm_pick_schema(allowed, p.pergunta)
+            preferred = picked or best_by_overlap
+        else:
+            preferred = best_by_overlap
+        schema_try_order = [preferred] + [s for s in allowed if s != preferred]
+
+        last_err: Optional[str] = None
+
+        # 3) Tenta executar na ordem decidida
+        for schema in schema_try_order:
+            db_url = build_sqlalchemy_url(base_parts[0], base_parts[1], base_parts[2],
+                                          base_parts[3], base_parts[4], schema, base_parts[5])
+            eng = create_engine(db_url, pool_pre_ping=True, future=True)
             try:
-                url = make_url(p.database_url)
-            except Exception:
-                raise HTTPException(status_code=400, detail=f"URL inválida: {first_err}")
+                with eng.connect() as conn:
+                    catalog = _catalog_for_current_db(conn, db_name=schema)
+                    esquema_txt = _esquema_resumido(catalog)
+                    prompt = PROMPT_BASE.format(esquema=esquema_txt, pergunta=p.pergunta)
+                    sql = chamar_llm_azure(prompt_usuario=prompt, limit=p.max_linhas, dialeto="MySQL")
 
-            last_err = first_err
-            for temp_db in _TEMP_DB_ORDER:
+                    try:
+                        sql_seguro = proteger_sql_singledb(sql, catalog, db_name=schema, max_linhas=p.max_linhas)
+                    except HTTPException as e:
+                        msg = str(e.detail)
+                        if "Tabela(s) não encontrada(s)" in msg or "multi-DB" in msg:
+                            last_err = f"[{schema}] {msg}"
+                            continue
+                        raise
+
+                    t0 = time.time()
+                    try:
+                        resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
+                    except Exception as err:
+                        corre = f"Esquema:\n{esquema_txt}\n\nErro:\n{err}\n\nCorrija (somente SELECT, LIMIT {p.max_linhas} se faltar):\n{sql_seguro}"
+                        sql2 = chamar_llm_azure(corre, limit=p.max_linhas, dialeto="MySQL")
+                        sql_seguro = proteger_sql_singledb(sql2, catalog, db_name=schema, max_linhas=p.max_linhas)
+                        resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
+                    dur_ms = int((time.time() - t0) * 1000)
+
+                # auditoria best-effort
                 try:
-                    url_temp = str(url.set(database=temp_db))
-                    engine = create_engine(url_temp, pool_pre_ping=True)
-                    with engine.connect() as conn:
-                        only_db = _parse_schema_override(p.pergunta)
-                        return _catalog_all(conn, only_db=only_db)
-                except Exception as e:
-                    last_err = e
-                    continue
-            raise HTTPException(status_code=400, detail=str(last_err))
+                    with SessionCfg() as s:
+                        s.add(QueryAudit(
+                            org_id=p.org_id, schema_used=schema,
+                            prompt_snip=p.pergunta[:500], sql_text=sql_seguro,
+                            row_count=len(resultado["dados"]) if resultado and "dados" in resultado else None,
+                            duration_ms=dur_ms
+                        ))
+                        s.commit()
+                except Exception:
+                    pass
+
+                return {"org_id": p.org_id, "schema_usado": schema, "sql": sql_seguro, "resultado": resultado}
+
+            except HTTPException as e:
+                last_err = f"[{schema}] {e.detail}"
+                continue
+            except Exception as e:
+                last_err = f"[{schema}] {e}"
+                continue
+
+        raise HTTPException(status_code=400, detail=last_err or "Falha ao executar em todos os schemas permitidos.")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================================
+# BOOTSTRAP PÚBLICO (self-signup do admin + org)
+# =========================================
+class PublicBootstrapOrg(BaseModel):
+    org_name: str
+    database_url: str
+    allowed_schemas: List[str]
+    admin_name: str
+    admin_email: str
+    admin_api_key: str  # o próprio admin define a chave dele (min 16 chars)
+
+class PublicBootstrapResponse(BaseModel):
+    org_id: str
+    admin_user_id: str
+    admin_email: str
+
+
+from sqlalchemy.exc import IntegrityError
+
+@app.post("/public/bootstrap_org", response_model=PublicBootstrapResponse)
+def public_bootstrap_org(p: PublicBootstrapOrg):
+    # Validações mínimas para MVP
+    if len(p.admin_api_key) < 16:
+        raise HTTPException(status_code=400, detail="admin_api_key deve ter pelo menos 16 caracteres.")
+    if not p.allowed_schemas:
+        raise HTTPException(status_code=400, detail="allowed_schemas não pode ser vazio.")
+
+    # Parse da conexão
+    parts = parse_database_url(p.database_url)
+    if not parts["username"] or not parts["password"]:
+        raise HTTPException(status_code=400, detail="database_url deve conter usuário e senha.")
+
+    org_id = uuid4().hex[:12]
+    admin_id = uuid4().hex[:12]
+
+    try:
+        with SessionCfg() as s:
+            # validações explícitas p/ evitar IntegrityError genérico
+            if s.query(Org).filter(Org.name == p.org_name).first():
+                raise HTTPException(status_code=400, detail="Já existe uma organização com esse nome.")
+            if s.query(User).filter(User.email == p.admin_email).first():
+                raise HTTPException(status_code=400, detail="Já existe um usuário com esse e-mail.")
+
+            org = Org(id=org_id, name=p.org_name, status="active")
+            s.add(org)
+
+            s.add(OrgDbConnection(
+                org_id=org_id,
+                driver=parts["driver"], host=parts["host"], port=parts["port"],
+                username=parts["username"], password_enc=encrypt_str(parts["password"]),
+                database_name=parts["database_name"], options_json=parts["options"]
+            ))
+
+            for sch in p.allowed_schemas:
+                s.add(OrgAllowedSchema(org_id=org_id, schema_name=sch))
+
+            admin_user = User(
+                id=admin_id,
+                name=p.admin_name,
+                email=p.admin_email,
+                role="admin",
+                api_key_sha=sha256_hex(p.admin_api_key),
+            )
+            s.add(admin_user)
+            s.add(OrgMember(user_id=admin_id, org_id=org_id, role_in_org="admin_org"))
+
+            s.commit()
+
+        return PublicBootstrapResponse(
+            org_id=org_id, admin_user_id=admin_id, admin_email=p.admin_email
+        )
+
+    except IntegrityError as ie:
+        # retorna erro claro em vez de 500
+        raise HTTPException(status_code=400, detail=f"Violação de integridade no banco de configuração: {str(ie.orig)}") from ie
+    except HTTPException:
+        raise
+    except Exception as e:
+        # retorna a mensagem real para depurar agora
+        raise HTTPException(status_code=400, detail=f"Falha no bootstrap: {e}")
+
+
+# =========================================
+# Utilitários (protegidos para admin)
+# =========================================
+@app.post("/_debug_connect")
+def debug_connect(p: PerguntaDireta, _u: AuthedUser = Depends(require_admin)):
+    u = make_url(p.database_url)
+    if not u.database:
+        raise HTTPException(status_code=400, detail="Passe uma database_url com DB/schema.")
+    eng = create_engine(p.database_url, pool_pre_ping=True, future=True)
+    try:
+        with eng.connect() as c:
+            dbn = c.execute(sqltext("SELECT DATABASE()")).scalar()
+            dbs = [r[0] for r in c.execute(sqltext("SHOW DATABASES"))]
+            one = c.execute(sqltext("SELECT 1")).scalar()
+        return {"ok": True, "database_corrente": dbn, "databases": dbs, "select_1": one}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/_env")
+def _env(_u: AuthedUser = Depends(require_admin)):
+    return {
+        "loaded_dotenv_from": str(DOTENV_PATH),
+        "DISABLE_AZURE_LLM": DISABLE_AZURE_LLM,
+        "AZURE_OPENAI_ENDPOINT_set": bool(AZURE_OPENAI_ENDPOINT),
+        "AZURE_OPENAI_DEPLOYMENT_set": bool(AZURE_OPENAI_DEPLOYMENT),
+        "AZURE_OPENAI_API_KEY_set": bool(AZURE_OPENAI_API_KEY),
+        "AZURE_OPENAI_API_VERSION": AZURE_OPENAI_API_VERSION,
+    }

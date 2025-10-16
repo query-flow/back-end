@@ -4,3 +4,9 @@ sqlalchemy
 pymysql
 httpx
 dotenv
+PyPDF2
+python-docx
+openpyxl
+python-multipart
+pandas
+matplotlib

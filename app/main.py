@@ -1,31 +1,26 @@
 # app/main.py
 from __future__ import annotations
-import os, re, time, hashlib, base64
+import os, re, time, hashlib, base64, json
 from uuid import uuid4
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode, quote
 from pathlib import Path
 from io import BytesIO
 
-# === Matplotlib headless (evita NSWindow em macOS/servers) ===
-os.environ.setdefault("MPLBACKEND", "Agg")
-try:
-    import matplotlib
-    matplotlib.use("Agg", force=True)
-except Exception:
-    pass
-
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import httpx
+
+# Matplotlib em modo headless (evita abrir janela GUI no macOS / threads)
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 # SQLAlchemy (config DB)
 from sqlalchemy import (
     create_engine,
     text as sqltext,
     bindparam,
-    String, Integer, Text, ForeignKey, JSON, UniqueConstraint
+    String, Integer, Text, ForeignKey, JSON
 )
 from sqlalchemy.orm import (
     DeclarativeBase, Mapped, mapped_column, relationship,
@@ -78,7 +73,7 @@ class Base(DeclarativeBase):
 class Org(Base):
     __tablename__ = "orgs"
     id: Mapped[str]     = mapped_column(String(36), primary_key=True)
-    name: Mapped[str]   = mapped_column(String(120), unique=True)
+    name: Mapped[str]   = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(20), default="active")
 
     conn: Mapped["OrgDbConnection"] = relationship(back_populates="org", uselist=False, cascade="all, delete-orphan")
@@ -110,7 +105,6 @@ class BizDocument(Base):
     id: Mapped[int]            = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[str]        = mapped_column(String(36), ForeignKey("orgs.id"))
     title: Mapped[str]         = mapped_column(String(255))
-    # Não armazenamos arquivo nem URL: só metadados ricos extraídos
     metadata_json: Mapped[dict]= mapped_column(JSON, default={})
     org: Mapped[Org]           = relationship(back_populates="docs")
 
@@ -127,12 +121,11 @@ class QueryAudit(Base):
 # === RBAC ===
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("api_key_sha", name="uq_users_api_key_sha"),)
     id: Mapped[str]        = mapped_column(String(36), primary_key=True)
     name: Mapped[str]      = mapped_column(String(120))
     email: Mapped[str]     = mapped_column(String(255), unique=True)
     role: Mapped[str]      = mapped_column(String(10))  # 'admin' | 'user'
-    api_key_sha: Mapped[str] = mapped_column(String(64))  # sha256 da API key (UNIQUE via constraint)
+    api_key_sha: Mapped[str] = mapped_column(String(64), unique=True)  # sha256 da API key (UNIQUE!)
     org_links: Mapped[List["OrgMember"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 class OrgMember(Base):
@@ -359,7 +352,6 @@ class AdminUserCreate(BaseModel):
     email: str
     role: str = Field(..., pattern="^(admin|user)$")
     api_key_plain: str = Field(..., min_length=16)
-    # vinculação automática opcional
     org_id: Optional[str] = None
     org_role: Optional[str] = Field(default="member")
 
@@ -377,16 +369,12 @@ class PerguntaOrg(BaseModel):
     org_id: str
     pergunta: str
     max_linhas: int = 100
-    enrich: bool = True
+    enrich: bool = True  # habilita insights/gráfico
 
 class PerguntaDireta(BaseModel):
     database_url: str
     pergunta: str
     max_linhas: int = 100
-
-class AdminDocManualCreate(BaseModel):
-    title: str
-    metadata_json: Dict[str, Any]
 
 
 # =========================================
@@ -429,121 +417,6 @@ def require_org_access(org_id: str, user: AuthedUser, db: Session) -> None:
     link = db.query(OrgMember).filter_by(user_id=user.id, org_id=org_id).first()
     if not link:
         raise HTTPException(status_code=403, detail="Sem acesso a esta organização.")
-
-
-# =========================================
-# Endpoints ADMIN (protegidos)
-# =========================================
-@app.post("/admin/orgs", response_model=AdminOrgResponse)
-def admin_create_org(payload: AdminOrgCreate, _u: AuthedUser = Depends(require_admin)):
-    try:
-        parts = parse_database_url(payload.database_url)
-        if not parts["username"] or not parts["password"]:
-            raise HTTPException(status_code=400, detail="database_url deve conter usuário e senha.")
-
-        org_id = uuid4().hex[:12]
-        with SessionCfg() as db:
-            if db.query(Org).filter(Org.name == payload.name).first():
-                raise HTTPException(status_code=400, detail="Já existe uma organização com esse nome.")
-            org = Org(id=org_id, name=payload.name, status="active")
-            db.add(org)
-            db.add(OrgDbConnection(
-                org_id=org_id,
-                driver=parts["driver"], host=parts["host"], port=parts["port"],
-                username=parts["username"], password_enc=encrypt_str(parts["password"]),
-                database_name=parts["database_name"], options_json=parts["options"]
-            ))
-            for s in payload.allowed_schemas:
-                db.add(OrgAllowedSchema(org_id=org_id, schema_name=s))
-            for d in payload.documents:
-                db.add(BizDocument(org_id=org_id, title=d["title"], metadata_json=d.get("metadata_json", {})))
-            db.commit()
-        return AdminOrgResponse(org_id=org_id, name=payload.name, allowed_schemas=payload.allowed_schemas)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/admin/orgs/{org_id}", response_model=AdminOrgResponse)
-def admin_get_org(org_id: str, _u: AuthedUser = Depends(require_admin)):
-    with SessionCfg() as db:
-        org = db.get(Org, org_id)
-        if not org:
-            raise HTTPException(status_code=404, detail="org_id não encontrado.")
-        schemas = [s.schema_name for s in org.schemas]
-        return AdminOrgResponse(org_id=org.id, name=org.name, allowed_schemas=schemas)
-
-@app.post("/admin/orgs/{org_id}/test-connection")
-def admin_test_connection(org_id: str, _u: AuthedUser = Depends(require_admin)):
-    with SessionCfg() as db:
-        org = db.get(Org, org_id)
-        if not (org and org.conn):
-            raise HTTPException(status_code=404, detail="org_id não encontrado.")
-        pwd = decrypt_str(org.conn.password_enc)
-        db_url = build_sqlalchemy_url(
-            org.conn.driver, org.conn.host, org.conn.port,
-            org.conn.username, pwd, org.conn.database_name, org.conn.options_json
-        )
-    eng = create_engine(db_url, pool_pre_ping=True, future=True)
-    try:
-        with eng.connect() as c:
-            cur = c.execute(sqltext("SELECT DATABASE()")).scalar()
-            one = c.execute(sqltext("SELECT 1")).scalar()
-        return {"ok": True, "database_corrente": cur, "select_1": one}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# --- Users (admin) ---
-@app.post("/admin/users", response_model=AdminUserResponse)
-def admin_create_user(payload: AdminUserCreate, _u: AuthedUser = Depends(require_admin)):
-    with SessionCfg() as db:
-        if db.query(User).filter_by(email=payload.email).one_or_none():
-            raise HTTPException(status_code=400, detail="Email já cadastrado.")
-        if db.query(User).filter_by(api_key_sha=sha256_hex(payload.api_key_plain)).one_or_none():
-            raise HTTPException(status_code=400, detail="API key já está em uso. Gere uma diferente.")
-        user = User(
-            id=uuid4().hex[:12],
-            name=payload.name,
-            email=payload.email,
-            role=payload.role,
-            api_key_sha=sha256_hex(payload.api_key_plain),
-        )
-        db.add(user)
-        # vinculação automática opcional
-        if payload.org_id:
-            org = db.get(Org, payload.org_id)
-            if not org:
-                raise HTTPException(status_code=404, detail="org_id para vincular não encontrada.")
-            db.add(OrgMember(user_id=user.id, org_id=payload.org_id, role_in_org=payload.org_role or "member"))
-        db.commit()
-        return AdminUserResponse(user_id=user.id, name=user.name, email=user.email, role=user.role)
-
-@app.post("/admin/orgs/{org_id}/members")
-def admin_add_member(org_id: str, payload: AdminOrgMemberAdd, _u: AuthedUser = Depends(require_admin)):
-    with SessionCfg() as db:
-        org = db.get(Org, org_id)
-        user = db.get(User, payload.user_id)
-        if not org:
-            raise HTTPException(status_code=404, detail="org não encontrada.")
-        if not user:
-            raise HTTPException(status_code=404, detail="user não encontrado.")
-        link = db.query(OrgMember).filter_by(org_id=org_id, user_id=user.id).one_or_none()
-        if link:
-            link.role_in_org = payload.role_in_org
-        else:
-            db.add(OrgMember(user_id=user.id, org_id=org_id, role_in_org=payload.role_in_org))
-        db.commit()
-        return {"ok": True, "org_id": org_id, "user_id": user.id, "role_in_org": payload.role_in_org}
-
-@app.delete("/admin/users/{user_id}")
-def admin_delete_user(user_id: str, _u: AuthedUser = Depends(require_admin)):
-    with SessionCfg() as db:
-        user = db.get(User, user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="user não encontrado.")
-        db.delete(user)
-        db.commit()
-        return {"ok": True, "deleted_user_id": user_id}
 
 
 # =========================================
@@ -626,85 +499,48 @@ def ask_llm_pick_schema(allowed: list[str], pergunta: str) -> Optional[str]:
 # Insights helpers
 # =========================================
 def _collect_biz_context_for_org(org: Org) -> str:
+    """
+    Concatena títulos e metadados dos documentos da org para contexto (sem baixar arquivos).
+    """
     if not org.docs:
         return "Sem documentos de negócio cadastrados."
     partes = []
     for d in org.docs:
         md = d.metadata_json or {}
-        md_txt = "; ".join(f"{k}: {v}" for k, v in md.items())
+        md_txt = "; ".join(f"{k}: {v}" for k, v in md.items() if k != "_llm_error")
         partes.append(f"- {d.title} ({md_txt})" if md_txt else f"- {d.title}")
     return "Documentos de negócio cadastrados:\n" + "\n".join(partes)
 
-def _pick_chart_axes(resultado: Dict[str, Any]) -> Optional[Tuple[List[str], List[float], str]]:
+def _looks_like_ranking_table(resultado: Dict[str, Any]) -> bool:
     cols = resultado.get("colunas", [])
     rows = resultado.get("dados", [])
-    if not cols or not rows:
-        return None
-
-    # Tenta detectar primeira coluna categórica (string-ish)
-    cat_idx = None
-    for i, c in enumerate(cols):
-        # se a maioria dos valores é string/não numérico, assume categórica
-        sample = [r.get(c) for r in rows[:10]]
-        non_num = 0
-        for v in sample:
-            try:
-                float(v)
-                # numérico
-            except:
-                non_num += 1
-        if non_num >= max(1, len(sample)//2):
-            cat_idx = i
-            break
-
-    # Se não achou categórica, usa a coluna 0 como rótulo
-    if cat_idx is None:
-        cat_idx = 0
-
-    # Tenta achar uma coluna numérica diferente da categórica
-    num_idx = None
-    for j, c in enumerate(cols):
-        if j == cat_idx: continue
-        ok = True
-        for v in [r.get(c) for r in rows[:10]]:
-            try:
-                float(v)
-            except:
-                ok = False
-                break
-        if ok:
-            num_idx = j
-            break
-
-    if num_idx is None:
-        return None
-
-    labels = [str(r.get(cols[cat_idx])) for r in rows]
-    values = []
-    for r in rows:
+    if len(cols) != 2 or len(rows) < 3:
+        return False
+    key = cols[1]
+    sample = rows[:5]
+    def _is_num(x):
         try:
-            values.append(float(r.get(cols[num_idx]) or 0))
+            float(x)
+            return True
         except:
-            values.append(0.0)
+            return False
+    return all(_is_num(r.get(key)) for r in sample if key in r)
 
-    title = f"{cols[num_idx]} por {cols[cat_idx]}"
-    return labels, values, title
-
-def _make_bar_chart_base64_generic(resultado: Dict[str, Any]) -> Optional[str]:
+def _make_bar_chart_base64(resultado: Dict[str, Any]) -> Optional[str]:
     try:
+        import matplotlib
         import matplotlib.pyplot as plt
     except Exception:
         return None
-
-    picked = _pick_chart_axes(resultado)
-    if not picked:
-        return None
-    labels, values, title = picked
-
+    cols = resultado["colunas"]
+    rows = resultado["dados"]
+    cat_key, val_key = cols[0], cols[1]
+    cats = [str(r.get(cat_key)) for r in rows]
+    vals = [float(r.get(val_key) or 0) for r in rows]
     fig = plt.figure()
-    plt.bar(labels, values)
+    plt.bar(cats, vals)
     plt.xticks(rotation=45, ha="right")
-    plt.title(title)
+    plt.title(f"{val_key} por {cat_key}")
     plt.tight_layout()
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=150)
@@ -750,6 +586,293 @@ def _insights_from_llm(pergunta: str, resultado: Dict[str, Any], biz_context: st
 
 
 # =========================================
+# Extração de metadados (LLM robust + heurística)
+# =========================================
+def _strip_code_fences(s: str) -> str:
+    s2 = s.strip()
+    if s2.startswith("```"):
+        s2 = re.sub(r"^```[a-zA-Z0-9]*\s*", "", s2)
+        s2 = re.sub(r"\s*```$", "", s2)
+    return s2.strip()
+
+def _find_json_in_text(s: str) -> dict:
+    s = _strip_code_fences(s)
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    start = s.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == "{":
+                depth += 1
+            elif s[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    chunk = s[start:i+1]
+                    try:
+                        return json.loads(chunk)
+                    except Exception:
+                        break
+        start = s.find("{", start + 1)
+    raise ValueError("Não foi possível localizar JSON válido na resposta.")
+
+def _heuristic_extract(text: str) -> dict:
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    summary = " ".join(lines[:6])[:600]
+
+    kpis = []
+    for l in lines:
+        m = re.search(r"([\w\s%/()\-\.]{3,40})\s*[:\-]\s*([0-9][0-9\.,%/]*)", l)
+        if m:
+            k = m.group(1).strip()
+            v = m.group(2).strip()
+            if len(kpis) < 10:
+                kpis.append({"name": k, "value": v})
+
+    goals = []
+    for l in lines:
+        if re.search(r"\b(meta|objetivo|goal|target)\b", l, re.I):
+            if len(goals) < 10:
+                goals.append(l)
+
+    tf = ""
+    for l in lines:
+        mt = re.search(r"\b(202[0-9]|Q[1-4]\s*20[0-9]{2}|H[12]\s*20[0-9]{2}|[JFMASOND][a-z]{2,}\s?20[0-9]{2})\b", l)
+        if mt:
+            tf = mt.group(0)
+            break
+
+    return {
+        "summary": summary or "Resumo não disponível.",
+        "kpis": kpis,
+        "goals": goals,
+        "timeframe": tf,
+        "notes": "",
+        "source_kind": "uploaded_document"
+    }
+
+def _extract_metadata_with_llm(text: str) -> dict:
+    if DISABLE_AZURE_LLM or not AZURE_OPENAI_API_KEY or not AZURE_OPENAI_DEPLOYMENT or not AZURE_OPENAI_ENDPOINT:
+        raise RuntimeError("LLM desabilitada ou credenciais ausentes.")
+
+    system = (
+        "Você extrai metadados de documentos de negócio. "
+        "Responda ESTRITAMENTE em JSON com o schema: "
+        "{summary: str, kpis: [{name, value}], goals: [str], timeframe: str, notes: str, source_kind: 'uploaded_document'} "
+        "Sem comentários, sem markdown, sem texto fora do JSON."
+    )
+    user = (
+        "Documento a extrair (texto bruto, pode ser grande):\n\n"
+        f"{text}\n\n"
+        "Retorne apenas o JSON."
+    )
+    payload = {
+        "messages": [
+            {"role":"system","content":system},
+            {"role":"user","content":user}
+        ],
+        "temperature": 0.0,
+        "max_tokens": 900,
+        "top_p": 1.0
+    }
+    headers = {"Content-Type":"application/json","api-key": AZURE_OPENAI_API_KEY}
+    url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
+
+    with httpx.Client(timeout=httpx.Timeout(45.0, connect=10.0)) as cli:
+        r = cli.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        data = r.json()
+
+    raw = data["choices"][0]["message"]["content"]
+    return _find_json_in_text(raw)
+
+def extract_metadata(text: str) -> tuple[dict, Optional[str]]:
+    """
+    Tenta via LLM; se falhar, devolve heurística + erro para auditoria.
+    Retorna (metadata_json, llm_error_str_ou_None)
+    """
+    try:
+        md = _extract_metadata_with_llm(text)
+        return (md, None)
+    except Exception as e:
+        md = _heuristic_extract(text)
+        return (md, f"{e}")
+
+
+# =========================================
+# Endpoints ADMIN (protegidos)
+# =========================================
+@app.post("/admin/orgs", response_model=AdminOrgResponse)
+def admin_create_org(payload: AdminOrgCreate, _u: AuthedUser = Depends(require_admin)):
+    try:
+        parts = parse_database_url(payload.database_url)
+        if not parts["username"] or not parts["password"]:
+            raise HTTPException(status_code=400, detail="database_url deve conter usuário e senha.")
+
+        org_id = uuid4().hex[:12]
+        with SessionCfg() as db:
+            org = Org(id=org_id, name=payload.name, status="active")
+            db.add(org)
+            db.add(OrgDbConnection(
+                org_id=org_id,
+                driver=parts["driver"], host=parts["host"], port=parts["port"],
+                username=parts["username"], password_enc=encrypt_str(parts["password"]),
+                database_name=parts["database_name"], options_json=parts["options"]
+            ))
+            for s in payload.allowed_schemas:
+                db.add(OrgAllowedSchema(org_id=org_id, schema_name=s))
+            for d in payload.documents:
+                db.add(BizDocument(
+                    org_id=org_id, title=d["title"],
+                    metadata_json=d.get("metadata_json", {})
+                ))
+            db.commit()
+        return AdminOrgResponse(org_id=org_id, name=payload.name, allowed_schemas=payload.allowed_schemas)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/admin/orgs/{org_id}", response_model=AdminOrgResponse)
+def admin_get_org(org_id: str, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        org = db.get(Org, org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="org_id não encontrado.")
+        schemas = [s.schema_name for s in org.schemas]
+        return AdminOrgResponse(org_id=org.id, name=org.name, allowed_schemas=schemas)
+
+@app.post("/admin/orgs/{org_id}/test-connection")
+def admin_test_connection(org_id: str, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        org = db.get(Org, org_id)
+        if not (org and org.conn):
+            raise HTTPException(status_code=404, detail="org_id não encontrado.")
+        pwd = decrypt_str(org.conn.password_enc)
+        db_url = build_sqlalchemy_url(
+            org.conn.driver, org.conn.host, org.conn.port,
+            org.conn.username, pwd, org.conn.database_name, org.conn.options_json
+        )
+    eng = create_engine(db_url, pool_pre_ping=True, future=True)
+    try:
+        with eng.connect() as c:
+            cur = c.execute(sqltext("SELECT DATABASE()")).scalar()
+            one = c.execute(sqltext("SELECT 1")).scalar()
+        return {"ok": True, "database_corrente": cur, "select_1": one}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# --- Users (admin) ---
+@app.post("/admin/users", response_model=AdminUserResponse)
+def admin_create_user(payload: AdminUserCreate, admin: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        if db.query(User).filter_by(email=payload.email).one_or_none():
+            raise HTTPException(status_code=400, detail="Email já cadastrado.")
+        if db.query(User).filter_by(api_key_sha=sha256_hex(payload.api_key_plain)).one_or_none():
+            raise HTTPException(status_code=400, detail="API key já está em uso. Gere uma diferente.")
+        user = User(
+            id=uuid4().hex[:12],
+            name=payload.name,
+            email=payload.email,
+            role=payload.role,
+            api_key_sha=sha256_hex(payload.api_key_plain),
+        )
+        db.add(user)
+        # vincula automaticamente a org do admin (se vier org_id usa a passada)
+        org_id_to_link = payload.org_id
+        if not org_id_to_link:
+            # pega a primeira org do admin; se nenhuma, erro
+            admin_links = db.query(OrgMember).filter_by(user_id=admin.id).all()
+            if not admin_links:
+                raise HTTPException(status_code=400, detail="Admin não está vinculado a nenhuma organização.")
+            org_id_to_link = admin_links[0].org_id
+        db.add(OrgMember(user_id=user.id, org_id=org_id_to_link, role_in_org=payload.org_role or "member"))
+        db.commit()
+        return AdminUserResponse(user_id=user.id, name=user.name, email=user.email, role=user.role)
+
+@app.post("/admin/orgs/{org_id}/members")
+def admin_add_member(org_id: str, payload: AdminOrgMemberAdd, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as db:
+        org = db.get(Org, org_id)
+        user = db.get(User, payload.user_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="org não encontrada.")
+        if not user:
+            raise HTTPException(status_code=404, detail="user não encontrado.")
+        link = db.query(OrgMember).filter_by(org_id=org_id, user_id=user.id).one_or_none()
+        if link:
+            link.role_in_org = payload.role_in_org
+        else:
+            db.add(OrgMember(user_id=user.id, org_id=org_id, role_in_org=payload.role_in_org))
+        db.commit()
+        return {"ok": True, "org_id": org_id, "user_id": user.id, "role_in_org": payload.role_in_org}
+
+# --- Documents (admin) ---
+@app.post("/admin/orgs/{org_id}/documents")
+def admin_add_document(org_id: str,
+                       body: Dict[str, Any],
+                       _u: AuthedUser = Depends(require_admin)):
+    title = body.get("title") or "Documento sem título"
+    metadata_json = body.get("metadata_json") or {}
+    with SessionCfg() as s:
+        org = s.get(Org, org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="org_id inválido.")
+        doc = BizDocument(org_id=org_id, title=title, metadata_json=metadata_json)
+        s.add(doc)
+        s.commit()
+        return {"ok": True, "doc_id": doc.id, "org_id": org_id, "title": title, "metadata_json": metadata_json}
+
+@app.get("/admin/orgs/{org_id}/documents")
+def admin_list_documents(org_id: str, _u: AuthedUser = Depends(require_admin)):
+    with SessionCfg() as s:
+        docs = s.query(BizDocument).filter_by(org_id=org_id).all()
+        return {"org_id": org_id, "documents": [
+            {"id": d.id, "title": d.title, "metadata_json": d.metadata_json} for d in docs
+        ]}
+
+@app.post("/admin/orgs/{org_id}/documents/extract")
+def admin_extract_document(org_id: str,
+                           title: str = Form(...),
+                           file: UploadFile = File(...),
+                           _u: AuthedUser = Depends(require_admin)):
+    # Lê arquivo e transforma em texto simples
+    raw_bytes = file.file.read()
+    try:
+        text = raw_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        text = ""
+
+    # Extrai metadados (LLM robust + heurística)
+    metadata, llm_err = extract_metadata(text)
+    if llm_err:
+        metadata["_llm_error"] = f"Falha ao usar LLM: {llm_err}"
+
+    with SessionCfg() as s:
+        org = s.get(Org, org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="org_id inválido.")
+        doc = BizDocument(
+            org_id=org_id,
+            title=title,
+            metadata_json=metadata
+        )
+        s.add(doc)
+        s.commit()
+        preview = {
+            "summary": metadata.get("summary", ""),
+            "kpis": metadata.get("kpis", []),
+            "goals": metadata.get("goals", []),
+            "timeframe": metadata.get("timeframe", ""),
+            "notes": metadata.get("notes", ""),
+            "source_kind": metadata.get("source_kind", "")
+        }
+        return {"ok": True, "doc_id": doc.id, "org_id": org_id, "title": title, "meta_preview": preview}
+
+
+# =========================================
 # Endpoint principal (usuário final)
 # =========================================
 @app.post("/perguntar_org")
@@ -760,7 +883,7 @@ def perguntar_org(p: PerguntaOrg,
         # autorização por organização
         require_org_access(p.org_id, u, db)
 
-        # 1) Carrega config da org + contexto de negócio
+        # 1) Carrega config da org (e contexto de negócio)
         with SessionCfg() as s:
             org = s.get(Org, p.org_id)
             if not (org and org.conn):
@@ -838,7 +961,7 @@ def perguntar_org(p: PerguntaOrg,
                 insights_payload = None
                 if p.enrich:
                     summary = _insights_from_llm(p.pergunta, resultado, biz_context)
-                    chart_b64 = _make_bar_chart_base64_generic(resultado)
+                    chart_b64 = _make_bar_chart_base64(resultado) if _looks_like_ranking_table(resultado) else None
                     chart = {"mime": "image/png", "base64": chart_b64} if chart_b64 else None
                     insights_payload = {"summary": summary, "chart": chart}
 
@@ -939,137 +1062,6 @@ def public_bootstrap_org(p: PublicBootstrapOrg):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Falha no bootstrap: {e}")
 
-
-# =========================================
-# Documentos (admin)
-# =========================================
-def _extract_text_from_upload(file: UploadFile) -> str:
-    content = file.file.read()
-    # tenta por extensão/mimetype
-    name = (file.filename or "").lower()
-    ctype = (file.content_type or "").lower()
-    text = ""
-
-    def _safe_decode(b: bytes) -> str:
-        for enc in ("utf-8", "latin-1", "utf-16"):
-            try:
-                return b.decode(enc)
-            except:
-                continue
-        return ""
-
-    if name.endswith(".txt") or ctype.startswith("text/"):
-        text = _safe_decode(content)
-    elif name.endswith(".pdf") or "pdf" in ctype:
-        try:
-            import PyPDF2
-            reader = PyPDF2.PdfReader(BytesIO(content))
-            pages = []
-            for p in reader.pages:
-                pages.append(p.extract_text() or "")
-            text = "\n".join(pages)
-        except Exception:
-            text = _safe_decode(content)
-    elif name.endswith(".docx") or "officedocument.wordprocessingml.document" in ctype:
-        try:
-            import docx
-            doc = docx.Document(BytesIO(content))
-            text = "\n".join(p.text for p in doc.paragraphs)
-        except Exception:
-            text = _safe_decode(content)
-    else:
-        # tentativa bruta
-        text = _safe_decode(content)
-    return (text or "").strip()
-
-def _summarize_business_metadata(raw_text: str) -> Dict[str, Any]:
-    """
-    Gera metadados estruturados a partir do texto do documento.
-    Se LLM estiver desabilitado, aplica heurísticas simples.
-    """
-    base_meta = {
-        "summary": "",
-        "kpis": [],
-        "goals": [],
-        "timeframe": "",
-        "notes": "",
-        "source_kind": "uploaded_document"
-    }
-    if not raw_text:
-        base_meta["summary"] = "Documento vazio ou ilegível."
-        return base_meta
-
-    if DISABLE_AZURE_LLM or not AZURE_OPENAI_API_KEY or not AZURE_OPENAI_DEPLOYMENT or not AZURE_OPENAI_ENDPOINT:
-        # heurística simples: pega primeiras linhas e tenta detectar números
-        lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
-        base_meta["summary"] = " ".join(lines[:5])[:600]
-        nums = re.findall(r"\b\d+(?:[.,]\d+)?\b", raw_text)
-        if nums:
-            base_meta["kpis"] = [{"name": "valores_numericos_detectados", "values_sample": nums[:10]}]
-        # metas heurística
-        goals = []
-        for m in re.findall(r"(meta|objetivo|target)[:\- ]+(.{0,120})", raw_text, flags=re.I):
-            goals.append(m[1].strip())
-        base_meta["goals"] = goals[:8]
-        return base_meta
-
-    # Com LLM
-    system = (
-        "Você extrai metadados de documentos de contexto de negócio, devolvendo JSON com as chaves: "
-        "summary (string curta), kpis (lista de {name, formula?, current?, target?, unit?}), "
-        "goals (lista de strings), timeframe (string), notes (string). Responda somente JSON."
-    )
-    user = f"Documento (texto puro):\n{raw_text[:12000]}"
-    payload = {
-        "messages":[{"role":"system","content":system},{"role":"user","content":user}],
-        "temperature":0.1, "max_tokens":900, "top_p":0.95
-    }
-    headers = {"Content-Type":"application/json","api-key":AZURE_OPENAI_API_KEY}
-    url = _azure_chat_url()
-    try:
-        with httpx.Client(timeout=httpx.Timeout(40.0, connect=10.0)) as client:
-            r = client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            data = r.json()
-        content = data["choices"][0]["message"]["content"]
-        # tenta parsear como JSON
-        import json
-        meta = json.loads(content)
-        if isinstance(meta, dict):
-            meta["source_kind"] = "uploaded_document"
-            return meta
-        base_meta["summary"] = str(meta)[:800]
-        return base_meta
-    except Exception as e:
-        base_meta["summary"] = f"Falha ao usar LLM: {e}"
-        return base_meta
-
-@app.post("/admin/orgs/{org_id}/documents", response_model=dict)
-def admin_add_document(org_id: str, payload: AdminDocManualCreate, _u: AuthedUser = Depends(require_admin)):
-    with SessionCfg() as db:
-        org = db.get(Org, org_id)
-        if not org:
-            raise HTTPException(status_code=404, detail="org não encontrada.")
-        doc = BizDocument(org_id=org_id, title=payload.title, metadata_json=payload.metadata_json or {})
-        db.add(doc)
-        db.commit()
-        return {"ok": True, "doc_id": doc.id, "org_id": org_id}
-
-@app.post("/admin/orgs/{org_id}/documents/extract", response_model=dict)
-def admin_extract_document(org_id: str,
-                           title: str = Form(...),
-                           file: UploadFile = File(...),
-                           _u: AuthedUser = Depends(require_admin)):
-    with SessionCfg() as db:
-        org = db.get(Org, org_id)
-        if not org:
-            raise HTTPException(status_code=404, detail="org não encontrada.")
-        raw_text = _extract_text_from_upload(file)
-        meta = _summarize_business_metadata(raw_text)
-        doc = BizDocument(org_id=org_id, title=title, metadata_json=meta)
-        db.add(doc)
-        db.commit()
-        return {"ok": True, "doc_id": doc.id, "org_id": org_id, "title": title, "meta_preview": meta}
 
 # =========================================
 # Utilitários (protegidos para admin)

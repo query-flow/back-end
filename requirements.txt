@@ -1,9 +1,10 @@
-fastapi 
-uvicorn 
-sqlalchemy 
+fastapi
+uvicorn
+sqlalchemy
 pymysql
 httpx
-dotenv
+python-dotenv
+cryptography
 PyPDF2
 python-docx
 openpyxl

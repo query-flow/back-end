@@ -1,5 +1,6 @@
 from typing import List, Optional
-from sqlalchemy import String, Integer, Text, ForeignKey, JSON, UniqueConstraint
+from datetime import datetime
+from sqlalchemy import String, Integer, Text, ForeignKey, JSON, UniqueConstraint, DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -81,13 +82,27 @@ class QueryAudit(Base):
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("api_key_sha", name="uq_users_api_key_sha"),)
+    __table_args__ = (
+        UniqueConstraint("api_key_sha", name="uq_users_api_key_sha"),
+        UniqueConstraint("invite_token", name="uq_users_invite_token"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(120))
     email: Mapped[str] = mapped_column(String(255), unique=True)
-    role: Mapped[str] = mapped_column(String(10))  # 'admin' | 'user'
-    api_key_sha: Mapped[str] = mapped_column(String(64))  # sha256 of API key
+    role: Mapped[str] = mapped_column(String(10))  # 'admin' | 'user' (deprecated, use org_members.role_in_org)
+
+    # JWT Authentication
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="active")  # active, inactive, invited
+    password_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Invitation system
+    invite_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    invite_expires: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Legacy (will be removed in future migration)
+    api_key_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # sha256 of API key (deprecated)
 
     # Relationships
     org_links: Mapped[List["OrgMember"]] = relationship(

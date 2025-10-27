@@ -8,9 +8,9 @@ from app.models import User
 from app.api.routers import (
     admin_router,
     query_router,
-    bootstrap_router,
     documents_router,
-    debug_router,
+    auth_router,
+    members_router,
 )
 
 # Create FastAPI app
@@ -41,11 +41,11 @@ def startup():
 
 
 # Include routers
+app.include_router(auth_router)  # JWT authentication endpoints (public)
+app.include_router(members_router)  # Member management (admin only)
 app.include_router(admin_router)
 app.include_router(query_router)
-app.include_router(bootstrap_router)
 app.include_router(documents_router)
-app.include_router(debug_router)
 
 
 @app.get("/")

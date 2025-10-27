@@ -11,3 +11,5 @@ openpyxl
 python-multipart
 pandas
 matplotlib
+python-jose[cryptography]
+passlib[bcrypt]

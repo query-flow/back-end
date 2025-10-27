@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import sha256_hex, encrypt_str, decrypt_str
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_platform_admin
 from app.models import Org, OrgDbConnection, OrgAllowedSchema, BizDocument, User, OrgMember
 from app.schemas import (
     AdminOrgCreate,
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
 @router.post("/orgs", response_model=AdminOrgResponse)
-def create_org(payload: AdminOrgCreate, _u: AuthedUser = Depends(require_admin), db: Session = Depends(get_db)):
+async def create_org(payload: AdminOrgCreate, _u: AuthedUser = Depends(require_platform_admin), db: Session = Depends(get_db)):
     """Create a new organization"""
     try:
         parts = parse_database_url(payload.database_url)
@@ -67,7 +67,7 @@ def create_org(payload: AdminOrgCreate, _u: AuthedUser = Depends(require_admin),
 
 
 @router.get("/orgs/{org_id}", response_model=AdminOrgResponse)
-def get_org(org_id: str, _u: AuthedUser = Depends(require_admin), db: Session = Depends(get_db)):
+async def get_org(org_id: str, _u: AuthedUser = Depends(require_platform_admin), db: Session = Depends(get_db)):
     """Get organization details"""
     org = db.get(Org, org_id)
     if not org:
@@ -78,7 +78,7 @@ def get_org(org_id: str, _u: AuthedUser = Depends(require_admin), db: Session = 
 
 
 @router.post("/orgs/{org_id}/test-connection")
-def test_connection(org_id: str, _u: AuthedUser = Depends(require_admin), db: Session = Depends(get_db)):
+async def test_connection(org_id: str, _u: AuthedUser = Depends(require_platform_admin), db: Session = Depends(get_db)):
     """Test database connection for an organization"""
     org = db.get(Org, org_id)
     if not (org and org.conn):
@@ -101,7 +101,7 @@ def test_connection(org_id: str, _u: AuthedUser = Depends(require_admin), db: Se
 
 
 @router.post("/users", response_model=AdminUserResponse)
-def create_user(payload: AdminUserCreate, _u: AuthedUser = Depends(require_admin), db: Session = Depends(get_db)):
+async def create_user(payload: AdminUserCreate, _u: AuthedUser = Depends(require_platform_admin), db: Session = Depends(get_db)):
     """Create a new user"""
     if db.query(User).filter_by(email=payload.email).one_or_none():
         raise HTTPException(status_code=400, detail="Email já cadastrado.")
@@ -130,7 +130,7 @@ def create_user(payload: AdminUserCreate, _u: AuthedUser = Depends(require_admin
 
 
 @router.post("/orgs/{org_id}/members")
-def add_member(org_id: str, payload: AdminOrgMemberAdd, _u: AuthedUser = Depends(require_admin), db: Session = Depends(get_db)):
+async def add_member(org_id: str, payload: AdminOrgMemberAdd, _u: AuthedUser = Depends(require_platform_admin), db: Session = Depends(get_db)):
     """Add or update member in organization"""
     org = db.get(Org, org_id)
     user = db.get(User, payload.user_id)
@@ -151,7 +151,7 @@ def add_member(org_id: str, payload: AdminOrgMemberAdd, _u: AuthedUser = Depends
 
 
 @router.delete("/users/{user_id}")
-def delete_user(user_id: str, _u: AuthedUser = Depends(require_admin), db: Session = Depends(get_db)):
+async def delete_user(user_id: str, _u: AuthedUser = Depends(require_platform_admin), db: Session = Depends(get_db)):
     """Delete a user"""
     user = db.get(User, user_id)
     if not user:

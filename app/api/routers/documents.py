@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import get_current_user, require_org_access
 from app.models import Org, BizDocument
 from app.schemas import AdminDocManualCreate, AuthedUser
 from app.services.document_service import extract_text_from_upload, summarize_business_metadata
@@ -11,15 +11,18 @@ router = APIRouter(prefix="/admin/orgs/{org_id}/documents", tags=["Documents"])
 
 
 @router.post("", response_model=dict)
-def add_document(
+async def add_document(
     org_id: str,
     payload: AdminDocManualCreate,
-    _u: AuthedUser = Depends(require_admin),
+    u: AuthedUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Add a business document with manual metadata
     """
+    # Verificar acesso à organização
+    require_org_access(org_id, u, db)
+
     org = db.get(Org, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="org não encontrada.")
@@ -36,14 +39,17 @@ def add_document(
 
 
 @router.get("", response_model=dict)
-def list_documents(
+async def list_documents(
     org_id: str,
-    _u: AuthedUser = Depends(require_admin),
+    u: AuthedUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     List all business documents for an organization
     """
+    # Verificar acesso à organização
+    require_org_access(org_id, u, db)
+
     org = db.get(Org, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="org não encontrada.")
@@ -59,16 +65,19 @@ def list_documents(
 
 
 @router.post("/extract", response_model=dict)
-def extract_document(
+async def extract_document(
     org_id: str,
     title: str = Form(...),
     file: UploadFile = File(...),
-    _u: AuthedUser = Depends(require_admin),
+    u: AuthedUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Upload and extract metadata from a business document (PDF, DOCX, TXT)
     """
+    # Verificar acesso à organização
+    require_org_access(org_id, u, db)
+
     org = db.get(Org, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="org não encontrada.")

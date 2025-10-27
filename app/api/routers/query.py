@@ -6,10 +6,11 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db, SessionLocal
 from app.core.security import decrypt_str
-from app.dependencies.auth import require_user_or_admin, require_org_access
+from app.dependencies.auth import get_current_user, require_org_access
 from app.models import Org, QueryAudit
 from app.schemas import PerguntaOrg, AuthedUser
-from app.services.llm_service import chamar_llm_azure, ask_llm_pick_schema, PROMPT_BASE
+from app.services.llm.client import llm_client, enrichment_client
+from app.services.llm.nodes.base import QueryResult
 from app.services.catalog_service import (
     catalog_for_current_db,
     esquema_resumido,
@@ -17,20 +18,31 @@ from app.services.catalog_service import (
     rank_schemas_by_overlap,
 )
 from app.services.sql_service import proteger_sql_singledb, executar_sql_readonly_on_conn
-from app.services.insights_service import (
-    collect_biz_context_for_org,
-    insights_from_llm,
-    make_bar_chart_base64_generic,
-)
 from app.utils.database_utils import build_sqlalchemy_url
 
 router = APIRouter(tags=["Query"])
 
 
+def collect_biz_context_for_org(org: Org) -> str:
+    """
+    Collect business context from organization documents
+    """
+    if not org.docs:
+        return "Sem documentos de negócio cadastrados."
+
+    partes = []
+    for d in org.docs:
+        md = d.metadata_json or {}
+        md_txt = "; ".join(f"{k}: {v}" for k, v in md.items())
+        partes.append(f"- {d.title} ({md_txt})" if md_txt else f"- {d.title}")
+
+    return "Documentos de negócio cadastrados:\n" + "\n".join(partes)
+
+
 @router.post("/perguntar_org")
-def perguntar_org(
+async def perguntar_org(
     p: PerguntaOrg,
-    u: AuthedUser = Depends(require_user_or_admin),
+    u: AuthedUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -77,7 +89,7 @@ def perguntar_org(
 
         # Use LLM to pick schema if there's ambiguity
         if top_score == 0 or len(top_ties) > 1:
-            picked = ask_llm_pick_schema(allowed, p.pergunta)
+            picked = llm_client.pick_schema(allowed, p.pergunta)
             preferred = picked or best_by_overlap
         else:
             preferred = best_by_overlap
@@ -98,8 +110,11 @@ def perguntar_org(
                 with eng.connect() as conn:
                     catalog = catalog_for_current_db(conn, db_name=schema)
                     esquema_txt = esquema_resumido(catalog)
-                    prompt = PROMPT_BASE.format(esquema=esquema_txt, pergunta=p.pergunta)
-                    sql = chamar_llm_azure(prompt_usuario=prompt, limit=p.max_linhas, dialeto="MySQL")
+                    sql = llm_client.generate_sql(
+                        pergunta=p.pergunta,
+                        esquema=esquema_txt,
+                        limit=p.max_linhas
+                    )
 
                     try:
                         sql_seguro = proteger_sql_singledb(sql, catalog, db_name=schema, max_linhas=p.max_linhas)
@@ -114,12 +129,13 @@ def perguntar_org(
                     try:
                         resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
                     except Exception as err:
-                        # Retry with correction
-                        corre = (
-                            f"Esquema:\n{esquema_txt}\n\nErro:\n{err}\n\n"
-                            f"Corrija (somente SELECT, LIMIT {p.max_linhas} se faltar):\n{sql_seguro}"
+                        # Retry with correction using LLM
+                        sql2 = llm_client.correct_sql(
+                            sql_original=sql_seguro,
+                            erro=str(err),
+                            esquema=esquema_txt,
+                            limit=p.max_linhas
                         )
-                        sql2 = chamar_llm_azure(corre, limit=p.max_linhas, dialeto="MySQL")
                         sql_seguro = proteger_sql_singledb(sql2, catalog, db_name=schema, max_linhas=p.max_linhas)
                         resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
 
@@ -143,10 +159,28 @@ def perguntar_org(
                 # Generate insights if requested
                 insights_payload = None
                 if p.enrich:
-                    summary = insights_from_llm(p.pergunta, resultado, biz_context)
-                    chart_b64 = make_bar_chart_base64_generic(resultado)
-                    chart = {"mime": "image/png", "base64": chart_b64} if chart_b64 else None
-                    insights_payload = {"summary": summary, "chart": chart}
+                    # Convert resultado (dict format) to QueryResult (list format)
+                    colunas = resultado.get("colunas", [])
+                    dados_dict = resultado.get("dados", [])
+                    # Convert from List[Dict] to List[List] for pipeline compatibility
+                    dados_list = [[row.get(col) for col in colunas] for row in dados_dict]
+
+                    enriched = enrichment_client.enrich(
+                        pergunta=p.pergunta,
+                        query_result=QueryResult(
+                            sql=sql_seguro,
+                            schema=schema,
+                            colunas=colunas,
+                            dados=dados_list
+                        ),
+                        biz_context=biz_context,
+                        generate_insights=True,
+                        generate_chart=True
+                    )
+                    insights_payload = {
+                        "summary": enriched.get("insights"),
+                        "chart": enriched.get("chart")
+                    }
 
                 return {
                     "org_id": p.org_id,

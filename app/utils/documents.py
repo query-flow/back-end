@@ -122,6 +122,7 @@ def summarize_business_metadata(raw_text: str) -> Dict[str, Any]:
         f"api-version={settings.AZURE_OPENAI_API_VERSION}"
     )
 
+    content = ""
     try:
         with httpx.Client(timeout=httpx.Timeout(40.0, connect=10.0)) as client:
             r = client.post(url, headers=headers, json=payload)
@@ -129,6 +130,23 @@ def summarize_business_metadata(raw_text: str) -> Dict[str, Any]:
             data = r.json()
 
         content = data["choices"][0]["message"]["content"]
+
+        # Limpar markdown se houver (```json ... ```)
+        content = content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        # Se conteúdo está vazio, usar heurísticas
+        if not content:
+            lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+            base_meta["summary"] = " ".join(lines[:5])[:600]
+            return base_meta
+
         meta = json.loads(content)
 
         if isinstance(meta, dict):
@@ -136,6 +154,15 @@ def summarize_business_metadata(raw_text: str) -> Dict[str, Any]:
             return meta
 
         base_meta["summary"] = str(meta)[:800]
+        return base_meta
+
+    except json.JSONDecodeError as e:
+        # LLM retornou texto não-JSON, usar como resumo
+        if content and len(content) > 0:
+            base_meta["summary"] = content[:800]
+        else:
+            lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+            base_meta["summary"] = " ".join(lines[:5])[:600]
         return base_meta
 
     except Exception as e:

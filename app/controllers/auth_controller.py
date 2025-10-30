@@ -15,8 +15,9 @@ from app.core.security import (
     create_refresh_token,
     decode_token,
     generate_invite_token,
+    encrypt_str,
 )
-from app.models import User, Organization, OrgMember
+from app.models import User, Organization, OrgMember, OrgDbConnection, OrgAllowedSchema
 
 # DTOs (Schemas)
 from app.schemas import (
@@ -89,6 +90,27 @@ def register(p: RegisterRequest, db: Session = Depends(get_db)):
         status="active"
     )
     db.add(org)
+
+    # Criar conexão de banco de dados
+    db_connection = OrgDbConnection(
+        org_id=org_id,
+        driver="mysql+pymysql",
+        host=p.db_host,
+        port=p.db_port,
+        username=p.db_user,
+        password_enc=encrypt_str(p.db_password),
+        database_name=p.db_name,
+        options_json={}
+    )
+    db.add(db_connection)
+
+    # Criar schemas permitidos
+    for schema_name in p.allowed_schemas:
+        allowed_schema = OrgAllowedSchema(
+            org_id=org_id,
+            schema_name=schema_name
+        )
+        db.add(allowed_schema)
 
     # Vincular user como org_admin
     org_member = OrgMember(

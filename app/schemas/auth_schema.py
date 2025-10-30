@@ -2,7 +2,7 @@
 Schemas for JWT authentication endpoints
 """
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Optional, List
 
 
 class RegisterRequest(BaseModel):
@@ -11,6 +11,14 @@ class RegisterRequest(BaseModel):
     email: EmailStr = Field(..., description="Email (será usado no login)")
     password: str = Field(..., min_length=8, description="Senha (mínimo 8 caracteres)")
     org_name: str = Field(..., min_length=1, max_length=120, description="Nome da organização")
+
+    # Database connection fields
+    db_host: str = Field(..., description="Host do banco de dados")
+    db_port: int = Field(..., description="Porta do banco de dados")
+    db_name: str = Field(..., description="Nome do banco de dados")
+    db_user: str = Field(..., description="Usuário do banco de dados")
+    db_password: str = Field(..., description="Senha do banco de dados")
+    allowed_schemas: List[str] = Field(..., description="Lista de schemas permitidos")
 
 
 class RegisterResponse(BaseModel):

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.core.database import get_db
+from app.core.auth import get_current_user
 from app.core.security import (
     hash_password,
     verify_password,
@@ -392,3 +393,30 @@ def admin_login(p: LoginRequest, db: Session = Depends(get_db)):
         refresh_token=refresh_token,
         token_type="bearer"
     )
+
+@router.get("/debug/me")
+async def debug_current_user(
+    u=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    DEBUG: Ver informações do usuário autenticado e sua organização.
+    Útil para verificar se o JWT tem org_id populado.
+    """
+    from app.core.auth import get_current_user
+    from app.models import OrgMember
+
+    # Buscar OrgMember
+    org_link = db.exec(
+        select(OrgMember).where(OrgMember.user_id == u.id)
+    ).first()
+
+    return {
+        "user_id": u.id,
+        "email": u.email,
+        "role": u.role,
+        "org_id_in_token": u.org_id,
+        "org_member_exists": bool(org_link),
+        "org_member_org_id": org_link.org_id if org_link else None,
+        "org_member_role": org_link.role_in_org if org_link else None
+    }

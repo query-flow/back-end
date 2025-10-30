@@ -58,8 +58,16 @@ async def perguntar_org(
         # Load org config and business context
         with SessionLocal() as s:
             org = s.get(Organization, org_id)
-            if not (org and org.connection):
-                raise HTTPException(status_code=404, detail="org_id inválido.")
+            if not org:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Organização '{org_id}' não encontrada. Verifique se a org existe."
+                )
+            if not org.connection:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Organização '{org_id}' não tem conexão de banco configurada."
+                )
 
             allowed = [x.schema_name for x in org.allowed_schemas]
             if not allowed:

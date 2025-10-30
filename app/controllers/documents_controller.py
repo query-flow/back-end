@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from sqlmodel import Session, select
 
 from app.core.database import get_db
-from app.core.auth import get_current_user, require_org_access
+from app.core.auth import get_current_user, get_user_org_id
 from app.models import Organization, BizDocument
 from app.utils.documents import extract_text_from_upload, summarize_business_metadata
 from app.schemas import AuthedUser
@@ -31,10 +31,8 @@ async def create_document(
     3. Controller chama MODEL para criar documento
     4. Controller retorna VIEW (JSON response)
     """
-    # Get user's org
-    org_id = u.org_id
-    if not org_id:
-        raise HTTPException(status_code=403, detail="Sem acesso a esta organização")
+    # Get user's org_id
+    org_id = get_user_org_id(u)
 
     org = db.get(Organization, org_id)
     if not org:
@@ -62,9 +60,8 @@ async def list_documents(
     """
     CONTROLLER: List all business documents for user's organization
     """
-    org_id = u.org_id
-    if not org_id:
-        raise HTTPException(status_code=403, detail="Sem acesso a esta organização")
+    # Get user's org_id
+    org_id = get_user_org_id(u)
 
     org = db.get(Organization, org_id)
     if not org:
@@ -92,9 +89,8 @@ async def extract_document(
     """
     CONTROLLER: Upload and extract metadata from a business document (PDF, DOCX, TXT)
     """
-    org_id = u.org_id
-    if not org_id:
-        raise HTTPException(status_code=403, detail="Sem acesso a esta organização")
+    # Get user's org_id
+    org_id = get_user_org_id(u)
 
     org = db.get(Organization, org_id)
     if not org:
@@ -133,9 +129,8 @@ async def delete_document(
     """
     CONTROLLER: Delete a document
     """
-    org_id = u.org_id
-    if not org_id:
-        raise HTTPException(status_code=403, detail="Sem acesso a esta organização")
+    # Get user's org_id
+    org_id = get_user_org_id(u)
 
     # CONTROLLER chama MODEL para buscar
     doc = BizDocument.get_by_id(db=db, doc_id=doc_id)

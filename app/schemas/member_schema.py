@@ -9,7 +9,6 @@ class InviteMemberRequest(BaseModel):
     """Request body for POST /members/invite"""
     email: EmailStr = Field(..., description="Email do membro a ser convidado")
     name: str = Field(..., min_length=1, max_length=120, description="Nome do membro")
-    org_id: str = Field(..., description="ID da organização")
 
 
 class InviteMemberResponse(BaseModel):

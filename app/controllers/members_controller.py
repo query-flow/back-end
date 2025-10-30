@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from app.core.database import get_db
 from app.core.security import generate_invite_token
-from app.core.auth import get_current_user, require_org_admin_access, require_org_access
+from app.core.auth import get_current_user, get_user_org_id
 from app.models import User, Organization, OrgMember
 from app.schemas import (
     AuthedUser,
@@ -44,8 +44,23 @@ def invite_member(
     - Somente org_admin pode convidar
     - Email não pode já estar cadastrado
     """
+    # Get user's org_id and check if user is org_admin
+    org_id = get_user_org_id(current_user)
+
     # Verificar se é admin da organização
-    require_org_admin_access(p.org_id, current_user, db)
+    org_member_admin = db.exec(
+        select(OrgMember).where(
+            OrgMember.user_id == current_user.id,
+            OrgMember.org_id == org_id,
+            OrgMember.role_in_org == "org_admin"
+        )
+    ).first()
+
+    if not org_member_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso restrito a administradores desta organização"
+        )
 
     # Verificar se email já existe
     existing_user = db.exec(
@@ -58,7 +73,7 @@ def invite_member(
         )
 
     # Verificar se organização existe
-    org = db.get(Organization, p.org_id)
+    org = db.get(Organization, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organização não encontrada")
 
@@ -84,7 +99,7 @@ def invite_member(
     org_member = OrgMember.create(
         db=db,
         user_id=user_id,
-        org_id=p.org_id,
+        org_id=org_id,
         role_in_org="member"
     )
 
@@ -102,9 +117,8 @@ def invite_member(
     )
 
 
-@router.get("/{org_id}", response_model=ListMembersResponse)
+@router.get("", response_model=ListMembersResponse)
 def list_members(
-    org_id: str,
     current_user: AuthedUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -117,8 +131,8 @@ def list_members(
     Restrições:
     - Usuário deve ter acesso à organização (admin ou member)
     """
-    # Verificar acesso à organização
-    require_org_access(org_id, current_user, db)
+    # Get user's org_id
+    org_id = get_user_org_id(current_user)
 
     # Buscar organização
     org = db.get(Organization, org_id)
@@ -149,9 +163,8 @@ def list_members(
     )
 
 
-@router.put("/{org_id}/{user_id}", response_model=UpdateMemberRoleResponse)
+@router.put("/{user_id}", response_model=UpdateMemberRoleResponse)
 def update_member_role(
-    org_id: str,
     user_id: str,
     p: UpdateMemberRoleRequest,
     current_user: AuthedUser = Depends(get_current_user),
@@ -168,8 +181,23 @@ def update_member_role(
     - Somente org_admin pode atualizar roles
     - Não pode remover o próprio admin se for o último
     """
+    # Get user's org_id and check if user is org_admin
+    org_id = get_user_org_id(current_user)
+
     # Verificar se é admin da organização
-    require_org_admin_access(org_id, current_user, db)
+    org_member_admin = db.exec(
+        select(OrgMember).where(
+            OrgMember.user_id == current_user.id,
+            OrgMember.org_id == org_id,
+            OrgMember.role_in_org == "org_admin"
+        )
+    ).first()
+
+    if not org_member_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso restrito a administradores desta organização"
+        )
 
     # Validar role
     if p.role_in_org not in ("org_admin", "member"):
@@ -215,9 +243,8 @@ def update_member_role(
     )
 
 
-@router.delete("/{org_id}/{user_id}", response_model=RemoveMemberResponse)
+@router.delete("/{user_id}", response_model=RemoveMemberResponse)
 def remove_member(
-    org_id: str,
     user_id: str,
     current_user: AuthedUser = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -235,8 +262,23 @@ def remove_member(
     - Não pode remover o último admin
     - Não pode remover a si mesmo se for o último admin
     """
+    # Get user's org_id and check if user is org_admin
+    org_id = get_user_org_id(current_user)
+
     # Verificar se é admin da organização
-    require_org_admin_access(org_id, current_user, db)
+    org_member_admin = db.exec(
+        select(OrgMember).where(
+            OrgMember.user_id == current_user.id,
+            OrgMember.org_id == org_id,
+            OrgMember.role_in_org == "org_admin"
+        )
+    ).first()
+
+    if not org_member_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso restrito a administradores desta organização"
+        )
 
     # CONTROLLER chama MODEL
     org_member = OrgMember.get_member(db=db, user_id=user_id, org_id=org_id)

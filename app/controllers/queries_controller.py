@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 
 from app.core.database import get_db, SessionLocal
 from app.core.security import decrypt_str
-from app.core.auth import get_current_user, require_org_access
+from app.core.auth import get_current_user, get_user_org_id
 from app.models import Organization, OrgAllowedSchema, QueryAudit
 from app.schemas import PerguntaOrg, AuthedUser
 from app.pipeline.llm.llm_provider import llm_client, enrichment_client
@@ -52,12 +52,12 @@ async def perguntar_org(
     Main endpoint: convert natural language to SQL, execute, and optionally generate insights
     """
     try:
-        # Check org access
-        require_org_access(p.org_id, u, db)
+        # Get user's org_id
+        org_id = get_user_org_id(u)
 
         # Load org config and business context
         with SessionLocal() as s:
-            org = s.get(Organization, p.org_id)
+            org = s.get(Organization, org_id)
             if not (org and org.connection):
                 raise HTTPException(status_code=404, detail="org_id inválido.")
 
@@ -84,7 +84,7 @@ async def perguntar_org(
             base_parts[6], base_parts[5]
         )
 
-        schema_index = get_schema_index_for_org(p.org_id, base_url_default_db, allowed)
+        schema_index = get_schema_index_for_org(org_id, base_url_default_db, allowed)
         ranked = rank_schemas_by_overlap(schema_index, p.pergunta)
 
         best_by_overlap, top_score = ranked[0]
@@ -148,7 +148,7 @@ async def perguntar_org(
                 try:
                     with SessionLocal() as s:
                         s.add(QueryAudit(
-                            org_id=p.org_id,
+                            org_id=org_id,
                             schema_used=schema,
                             prompt_snip=p.pergunta[:500],
                             sql_text=sql_seguro,
@@ -186,7 +186,7 @@ async def perguntar_org(
                     }
 
                 return {
-                    "org_id": p.org_id,
+                    "org_id": org_id,
                     "schema_usado": schema,
                     "sql": sql_seguro,
                     "resultado": resultado,

@@ -6,6 +6,7 @@ class AuthedUser(BaseModel):
     id: str
     email: str
     role: str
+    org_id: Optional[str] = None  # None para Platform Admins
 
 
 class AdminUserCreate(BaseModel):

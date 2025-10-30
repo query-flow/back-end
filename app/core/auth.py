@@ -181,3 +181,21 @@ async def require_platform_admin(
         )
 
     return current_user
+
+
+def get_user_org_id(user: AuthedUser) -> str:
+    """
+    Extract org_id from authenticated user.
+    Raises HTTPException if user doesn't belong to any organization.
+
+    Usage:
+        def my_route(user: AuthedUser = Depends(get_current_user)):
+            org_id = get_user_org_id(user)
+            # Use org_id...
+    """
+    if not user.org_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Usuário não pertence a nenhuma organização"
+        )
+    return user.org_id

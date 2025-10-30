@@ -21,6 +21,8 @@ from app.models import User, Organization, OrgMember
 from app.schemas import (
     RegisterRequest,
     RegisterResponse,
+    RegisterAdminRequest,
+    RegisterAdminResponse,
     LoginRequest,
     LoginResponse,
     AcceptInviteRequest,
@@ -108,6 +110,58 @@ def register(p: RegisterRequest, db: Session = Depends(get_db)):
         email=user.email,
         org_id=org_id,
         org_name=org.name,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer"
+    )
+
+
+@router.post("/register-admin", response_model=RegisterAdminResponse)
+def register_admin(p: RegisterAdminRequest, db: Session = Depends(get_db)):
+    """
+    Registro de Platform Admin.
+
+    Cria um usuário com role='admin' (acesso total à plataforma).
+
+    ⚠️ ATENÇÃO: Em produção, este endpoint deve ser desabilitado
+    ou protegido com autenticação de superadmin.
+    """
+    # Verificar se email já existe
+    existing_user = db.exec(
+        select(User).where(User.email == p.email)
+    ).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail="Email já cadastrado."
+        )
+
+    # Criar Platform Admin
+    user_id = str(uuid.uuid4())[:12]
+    hashed_pw = hash_password(p.password)
+
+    admin = User(
+        id=user_id,
+        name=p.name,
+        email=p.email,
+        password_hash=hashed_pw,
+        role="admin",  # ← Platform Admin
+        status="active",
+        password_changed_at=datetime.utcnow()
+    )
+    db.add(admin)
+    db.commit()
+    db.refresh(admin)
+
+    # Gerar tokens JWT
+    access_token = create_access_token(data={"sub": user_id})
+    refresh_token = create_refresh_token(data={"sub": user_id})
+
+    return RegisterAdminResponse(
+        user_id=user_id,
+        name=admin.name,
+        email=admin.email,
+        role=admin.role,
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer"

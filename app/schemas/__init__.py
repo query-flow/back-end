@@ -6,6 +6,8 @@ from .bootstrap_schema import PublicBootstrapOrg, PublicBootstrapResponse
 from .auth_schema import (
     RegisterRequest,
     RegisterResponse,
+    RegisterAdminRequest,
+    RegisterAdminResponse,
     LoginRequest,
     LoginResponse,
     AcceptInviteRequest,
@@ -37,6 +39,8 @@ __all__ = [
     "PublicBootstrapResponse",
     "RegisterRequest",
     "RegisterResponse",
+    "RegisterAdminRequest",
+    "RegisterAdminResponse",
     "LoginRequest",
     "LoginResponse",
     "AcceptInviteRequest",

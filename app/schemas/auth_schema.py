@@ -65,3 +65,21 @@ class RefreshTokenResponse(BaseModel):
     """Response for POST /refresh"""
     access_token: str
     token_type: str = "bearer"
+
+
+class RegisterAdminRequest(BaseModel):
+    """Request body for POST /register-admin"""
+    name: str = Field(..., min_length=1, max_length=120, description="Nome do Platform Admin")
+    email: EmailStr = Field(..., description="Email (será usado no login)")
+    password: str = Field(..., min_length=8, description="Senha (mínimo 8 caracteres)")
+
+
+class RegisterAdminResponse(BaseModel):
+    """Response for POST /register-admin"""
+    user_id: str
+    name: str
+    email: str
+    role: str
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"

@@ -1,9 +1,9 @@
-from .org_schemas import AdminOrgCreate, AdminOrgResponse
-from .user_schemas import AdminUserCreate, AdminUserResponse, AuthedUser, AdminOrgMemberAdd
-from .query_schemas import PerguntaOrg, PerguntaDireta
-from .document_schemas import AdminDocManualCreate
-from .bootstrap_schemas import PublicBootstrapOrg, PublicBootstrapResponse
-from .auth_schemas import (
+from .org_schema import AdminOrgCreate, AdminOrgResponse
+from .user_schema import AdminUserCreate, AdminUserResponse, AuthedUser, AdminOrgMemberAdd
+from .query_schema import PerguntaOrg, PerguntaDireta
+from .document_schema import AdminDocManualCreate
+from .bootstrap_schema import PublicBootstrapOrg, PublicBootstrapResponse
+from .auth_schema import (
     RegisterRequest,
     RegisterResponse,
     LoginRequest,
@@ -13,7 +13,7 @@ from .auth_schemas import (
     RefreshTokenRequest,
     RefreshTokenResponse,
 )
-from .member_schemas import (
+from .member_schema import (
     InviteMemberRequest,
     InviteMemberResponse,
     MemberInfo,

@@ -1,13 +1,17 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlmodel import Session, SQLModel, create_engine as sqlmodel_create_engine
+from sqlalchemy.orm import sessionmaker
+
 from app.core.config import settings
-from app.models import Base
+
+# Import all models to register them with SQLModel metadata
+from app.models import User, Organization, OrgDbConnection, OrgAllowedSchema, BizDocument, QueryAudit, OrgMember
 
 # Create database engine
 engine = create_engine(settings.CONFIG_DB_URL, pool_pre_ping=True, future=True)
 
 # Create session factory
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+SessionLocal = sessionmaker(bind=engine, class_=Session, autoflush=False, autocommit=False, future=True)
 
 
 def get_db():
@@ -18,4 +22,4 @@ def get_db():
 
 def init_db():
     """Initialize database tables"""
-    Base.metadata.create_all(engine)
+    SQLModel.metadata.create_all(engine)

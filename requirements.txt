@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-sqlalchemy
+sqlmodel
 pymysql
 httpx
 python-dotenv

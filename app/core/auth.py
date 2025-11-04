@@ -69,7 +69,6 @@ async def get_current_user(
     return AuthedUser(
         id=user.id,
         email=user.email,
-        role=user.role,
         org_id=org_link.org_id if org_link else None
     )
 
@@ -80,18 +79,18 @@ async def require_org_admin(
 ) -> AuthedUser:
     """
     Dependency to require organization admin role.
-    User must have role_in_org='org_admin' in at least one organization.
+    User must have role_in_org='admin' in at least one organization.
 
     Usage:
-        @router.post("/admin/members/invite")
+        @router.post("/members/invite")
         def invite_member(admin: AuthedUser = Depends(require_org_admin)):
             ...
     """
-    # Check if user is org_admin in any organization
+    # Check if user is admin in any organization
     admin_link = db.exec(
         select(OrgMember).where(
             OrgMember.user_id == current_user.id,
-            OrgMember.role_in_org == "org_admin"
+            OrgMember.role_in_org == "admin"
         )
     ).first()
 
@@ -136,13 +135,13 @@ def require_org_admin_access(org_id: str, user: AuthedUser, db: Session) -> OrgM
     Usage:
         def my_route(org_id: str, user: AuthedUser = Depends(get_current_user), db: Session = Depends(get_db)):
             admin_link = require_org_admin_access(org_id, user, db)
-            # User is confirmed org_admin
+            # User is confirmed admin
     """
     link = db.exec(
         select(OrgMember).where(
             OrgMember.user_id == user.id,
             OrgMember.org_id == org_id,
-            OrgMember.role_in_org == "org_admin"
+            OrgMember.role_in_org == "admin"
         )
     ).first()
 
@@ -153,34 +152,6 @@ def require_org_admin_access(org_id: str, user: AuthedUser, db: Session) -> OrgM
         )
 
     return link
-
-
-async def require_platform_admin(
-    current_user: AuthedUser = Depends(get_current_user)
-) -> AuthedUser:
-    """
-    Dependency to require Platform Admin role (JWT-based).
-
-    Platform Admin (user.role='admin') has full access to the platform,
-    including /admin/* endpoints for managing organizations, users, and infrastructure.
-
-    Difference from Org Admin:
-    - Platform Admin: Global access to all organizations and platform management
-    - Org Admin: Access only to their specific organization
-
-    Usage:
-        @router.post("/admin/orgs")
-        def create_org(admin: AuthedUser = Depends(require_platform_admin)):
-            # Only Platform Admins can access this
-            ...
-    """
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Acesso restrito a Platform Admins. Use /auth/admin-login para autenticar."
-        )
-
-    return current_user
 
 
 def get_user_org_id(user: AuthedUser) -> str:

@@ -21,7 +21,6 @@ class User(SQLModel, table=True):
     id: Optional[str] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     email: str = Field(unique=True, index=True)
-    role: str = Field(default="user")  # 'admin' (Platform Admin) | 'user' (regular)
 
     # JWT Authentication
     password_hash: Optional[str] = None
@@ -105,5 +104,4 @@ class UserResponse(SQLModel):
     id: str
     name: str
     email: str
-    role: str
     status: str

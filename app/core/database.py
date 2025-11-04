@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 
 # Import all models to register them with SQLModel metadata
-from app.models import User, Organization, OrgDbConnection, OrgAllowedSchema, BizDocument, QueryAudit, OrgMember
+from app.models import User, Organization, OrgDbConnection, OrgAllowedSchema, BizDocument, QueryAudit, OrgMember, ClarificationSession
 
 # Create database engine
 engine = create_engine(settings.CONFIG_DB_URL, pool_pre_ping=True, future=True)

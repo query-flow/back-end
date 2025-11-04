@@ -41,10 +41,10 @@ def invite_member(
     5. Membro usa /auth/accept-invite para ativar conta
 
     Restrições:
-    - Somente org_admin pode convidar
+    - Somente admin pode convidar
     - Email não pode já estar cadastrado
     """
-    # Get user's org_id and check if user is org_admin
+    # Get user's org_id and check if user is admin
     org_id = get_user_org_id(current_user)
 
     # Verificar se é admin da organização
@@ -52,7 +52,7 @@ def invite_member(
         select(OrgMember).where(
             OrgMember.user_id == current_user.id,
             OrgMember.org_id == org_id,
-            OrgMember.role_in_org == "org_admin"
+            OrgMember.role_in_org == "admin"
         )
     ).first()
 
@@ -88,7 +88,6 @@ def invite_member(
         name=p.name,
         email=p.email,
         status="invited",
-        role="user",  # Campo legado
         invite_token=invite_token,
         invite_expires=invite_expires,
         password_hash=None  # Será definido ao aceitar convite
@@ -174,14 +173,14 @@ def update_member_role(
     Atualizar role de um membro (somente admin).
 
     Permite:
-    - Promover member → org_admin
-    - Rebaixar org_admin → member
+    - Promover member → admin
+    - Rebaixar admin → member
 
     Restrições:
-    - Somente org_admin pode atualizar roles
+    - Somente admin pode atualizar roles
     - Não pode remover o próprio admin se for o último
     """
-    # Get user's org_id and check if user is org_admin
+    # Get user's org_id and check if user is admin
     org_id = get_user_org_id(current_user)
 
     # Verificar se é admin da organização
@@ -189,7 +188,7 @@ def update_member_role(
         select(OrgMember).where(
             OrgMember.user_id == current_user.id,
             OrgMember.org_id == org_id,
-            OrgMember.role_in_org == "org_admin"
+            OrgMember.role_in_org == "admin"
         )
     ).first()
 
@@ -200,10 +199,10 @@ def update_member_role(
         )
 
     # Validar role
-    if p.role_in_org not in ("org_admin", "member"):
+    if p.role_in_org not in ("admin", "member"):
         raise HTTPException(
             status_code=400,
-            detail="Role inválida. Use 'org_admin' ou 'member'"
+            detail="Role inválida. Use 'admin' ou 'member'"
         )
 
     # CONTROLLER chama MODEL
@@ -216,11 +215,11 @@ def update_member_role(
         )
 
     # Verificar se está tentando rebaixar o último admin
-    if org_member.role_in_org == "org_admin" and p.role_in_org == "member":
+    if org_member.role_in_org == "admin" and p.role_in_org == "member":
         admin_count = db.exec(
             select(OrgMember).where(
                 OrgMember.org_id == org_id,
-                OrgMember.role_in_org == "org_admin"
+                OrgMember.role_in_org == "admin"
             )
         ).all()
 
@@ -258,11 +257,11 @@ def remove_member(
     - Se usuário não tiver mais organizações, pode ser marcado como inativo
 
     Restrições:
-    - Somente org_admin pode remover
+    - Somente admin pode remover
     - Não pode remover o último admin
     - Não pode remover a si mesmo se for o último admin
     """
-    # Get user's org_id and check if user is org_admin
+    # Get user's org_id and check if user is admin
     org_id = get_user_org_id(current_user)
 
     # Verificar se é admin da organização
@@ -270,7 +269,7 @@ def remove_member(
         select(OrgMember).where(
             OrgMember.user_id == current_user.id,
             OrgMember.org_id == org_id,
-            OrgMember.role_in_org == "org_admin"
+            OrgMember.role_in_org == "admin"
         )
     ).first()
 
@@ -290,11 +289,11 @@ def remove_member(
         )
 
     # Verificar se está tentando remover o último admin
-    if org_member.role_in_org == "org_admin":
+    if org_member.role_in_org == "admin":
         admin_count = db.exec(
             select(OrgMember).where(
                 OrgMember.org_id == org_id,
-                OrgMember.role_in_org == "org_admin"
+                OrgMember.role_in_org == "admin"
             )
         ).all()
 

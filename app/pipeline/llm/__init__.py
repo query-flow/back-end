@@ -1,11 +1,28 @@
 """
-LLM service with node-based pipeline architecture
+LLM service - simplified pipeline with explicit function calls
 """
-from app.pipeline.llm.llm_provider import llm_client, enrichment_client, LLMClient, EnrichmentClient
+from app.pipeline.llm.sql_pipeline import (
+    analyze_intent,
+    generate_sql,
+    correct_sql,
+    generate_insights,
+    build_clarified_question,
+    pick_schema,
+    generate_chart,
+    QueryResult,
+    InsightsGenerated,
+    IntentAnalysis
+)
 
 __all__ = [
-    "llm_client",
-    "enrichment_client",
-    "LLMClient",
-    "EnrichmentClient",
+    "analyze_intent",
+    "generate_sql",
+    "correct_sql",
+    "generate_insights",
+    "build_clarified_question",
+    "pick_schema",
+    "generate_chart",
+    "QueryResult",
+    "InsightsGenerated",
+    "IntentAnalysis"
 ]

@@ -2,6 +2,9 @@
 Natural Language to SQL Query Pipeline - MVC2 Pattern
 """
 import time
+import uuid
+import logging
+from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import create_engine
@@ -10,10 +13,19 @@ from sqlmodel import Session, select
 from app.core.database import get_db, SessionLocal
 from app.core.security import decrypt_str
 from app.core.auth import get_current_user, get_user_org_id
-from app.models import Organization, OrgAllowedSchema, QueryAudit
+from app.models import Organization, OrgAllowedSchema, QueryAudit, ClarificationSession
 from app.schemas import PerguntaOrg, AuthedUser
-from app.pipeline.llm.llm_provider import llm_client, enrichment_client
-from app.pipeline.llm.nodes.base import QueryResult
+from app.pipeline.llm.sql_pipeline import (
+    analyze_intent,
+    generate_sql,
+    correct_sql,
+    build_clarified_question,
+    generate_insights,
+    pick_schema,
+    QueryResult,
+    InsightsGenerated,
+    generate_chart
+)
 from app.pipeline.catalog import (
     catalog_for_current_db,
     esquema_resumido,
@@ -22,6 +34,8 @@ from app.pipeline.catalog import (
 )
 from app.pipeline.sql_executor import proteger_sql_singledb, executar_sql_readonly_on_conn
 from app.utils.database import build_sqlalchemy_url
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Query"])
 
@@ -49,7 +63,11 @@ async def perguntar_org(
     db: Session = Depends(get_db)
 ):
     """
-    Main endpoint: convert natural language to SQL, execute, and optionally generate insights
+    Main endpoint with clarification support
+
+    Two flows:
+    1. New question → check clarity → maybe ask clarification
+    2. Clarification response → build clarified question → execute
     """
     try:
         # Get user's org_id
@@ -100,12 +118,125 @@ async def perguntar_org(
 
         # Use LLM to pick schema if there's ambiguity
         if top_score == 0 or len(top_ties) > 1:
-            picked = llm_client.pick_schema(allowed, p.pergunta)
+            picked = pick_schema(allowed, p.pergunta)
             preferred = picked or best_by_overlap
         else:
             preferred = best_by_overlap
 
         schema_try_order = [preferred] + [s for s in allowed if s != preferred]
+
+        # ========================================
+        # FLOW 2: Handle clarification response
+        # ========================================
+
+        if p.clarification_id:
+            logger.info(f"Processing clarification: {p.clarification_id}")
+
+            # Load session
+            session = db.get(ClarificationSession, p.clarification_id)
+            if not session or session.expires_at < datetime.utcnow():
+                raise HTTPException(400, "Clarification session expired or not found")
+
+            # Build clarified question
+            clarified_question = build_clarified_question(
+                session.original_question,
+                p.clarifications or {}
+            )
+
+            # Use the schema from session
+            schema = session.schema_name
+
+            # Connect and generate SQL (no intent check)
+            db_url = build_sqlalchemy_url(
+                base_parts[0], base_parts[1], base_parts[2],
+                base_parts[3], base_parts[4], schema, base_parts[5]
+            )
+            eng = create_engine(db_url, pool_pre_ping=True, future=True)
+
+            with eng.connect() as conn:
+                catalog = catalog_for_current_db(conn, db_name=schema)
+                esquema_txt = esquema_resumido(catalog)
+
+                # Generate SQL directly (skip intent analysis)
+                sql = generate_sql(clarified_question, esquema_txt, p.max_linhas)
+
+                # Protect and execute SQL
+                sql_seguro = proteger_sql_singledb(sql, catalog, db_name=schema, max_linhas=p.max_linhas)
+
+                t0 = time.time()
+                try:
+                    resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
+                except Exception as err:
+                    # Retry with correction
+                    sql2 = correct_sql(sql_seguro, str(err), esquema_txt, p.max_linhas)
+                    sql_seguro = proteger_sql_singledb(sql2, catalog, db_name=schema, max_linhas=p.max_linhas)
+                    resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
+
+                dur_ms = int((time.time() - t0) * 1000)
+
+            # Audit log
+            try:
+                with SessionLocal() as s:
+                    s.add(QueryAudit(
+                        org_id=org_id,
+                        schema_used=schema,
+                        prompt_snip=clarified_question[:500],
+                        sql_text=sql_seguro,
+                        row_count=len(resultado["dados"]) if resultado and "dados" in resultado else None,
+                        duration_ms=dur_ms
+                    ))
+                    s.commit()
+            except Exception:
+                pass
+
+            # Generate insights if requested
+            insights_payload = None
+            if p.enrich:
+                colunas = resultado.get("colunas", [])
+                dados_dict = resultado.get("dados", [])
+                dados_list = [[row.get(col) for col in colunas] for row in dados_dict]
+
+                # Generate insights using new pipeline
+                insights_text = generate_insights(
+                    pergunta=clarified_question,
+                    colunas=colunas,
+                    dados=dados_list,
+                    biz_context=biz_context
+                )
+
+                # Generate chart
+                chart_data = None
+                try:
+                    query_result = QueryResult(
+                        sql=sql_seguro,
+                        schema=schema,
+                        colunas=colunas,
+                        dados=dados_list
+                    )
+                    chart_data = generate_chart(query_result)
+                except Exception as e:
+                    logger.warning(f"Chart generation failed: {e}")
+
+                insights_payload = {
+                    "summary": insights_text,
+                    "chart": {"mime": "image/png", "base64": chart_data} if chart_data else None
+                }
+
+            # Cleanup session
+            db.delete(session)
+            db.commit()
+
+            return {
+                "org_id": org_id,
+                "schema_usado": schema,
+                "sql": sql_seguro,
+                "resultado": resultado,
+                "insights": insights_payload
+            }
+
+        # ========================================
+        # FLOW 1: New question with intent check
+        # ========================================
 
         last_err: Optional[str] = None
 
@@ -121,11 +252,55 @@ async def perguntar_org(
                 with eng.connect() as conn:
                     catalog = catalog_for_current_db(conn, db_name=schema)
                     esquema_txt = esquema_resumido(catalog)
-                    sql = llm_client.generate_sql(
+
+                    # NEW: Analyze intent first
+                    intent = analyze_intent(
                         pergunta=p.pergunta,
                         esquema=esquema_txt,
-                        limit=p.max_linhas
+                        confidence_threshold=0.5  # Só bloqueia quando crítico
                     )
+
+                    # NEW: Check if schema mismatch (data doesn't exist)
+                    if intent.schema_mismatch:
+                        logger.warning(f"Schema mismatch detected: {intent.missing_data}")
+                        return {
+                            "status": "schema_error",
+                            "message": "Desculpe, esses dados não estão disponíveis no sistema.",
+                            "missing_data": intent.missing_data,
+                            "suggestions": intent.questions[0]["options"] if intent.questions else [],
+                            "confidence": intent.confidence
+                        }
+
+                    # NEW: Check if clarification needed
+                    if not intent.is_clear:
+                        logger.warning(f"Low confidence ({intent.confidence:.2f}), requesting clarification")
+
+                        # Save session
+                        session = ClarificationSession(
+                            id=str(uuid.uuid4()),
+                            org_id=org_id,
+                            user_id=u.id,
+                            original_question=p.pergunta,
+                            schema_name=schema,
+                            intent_analysis=intent.dict(),
+                            created_at=datetime.utcnow(),
+                            expires_at=datetime.utcnow() + timedelta(minutes=10)
+                        )
+                        db.add(session)
+                        db.commit()
+
+                        # Return clarification request (stop here!)
+                        return {
+                            "status": "needs_clarification",
+                            "clarification_id": session.id,
+                            "message": "Preciso de mais detalhes para gerar uma consulta precisa:",
+                            "questions": intent.questions,
+                            "ambiguities": intent.ambiguities,
+                            "confidence": intent.confidence
+                        }
+
+                    # Intent is clear, generate SQL
+                    sql = generate_sql(p.pergunta, esquema_txt, p.max_linhas)
 
                     try:
                         sql_seguro = proteger_sql_singledb(sql, catalog, db_name=schema, max_linhas=p.max_linhas)
@@ -140,8 +315,8 @@ async def perguntar_org(
                     try:
                         resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
                     except Exception as err:
-                        # Retry with correction using LLM
-                        sql2 = llm_client.correct_sql(
+                        # Retry with correction using new pipeline
+                        sql2 = correct_sql(
                             sql_original=sql_seguro,
                             erro=str(err),
                             esquema=esquema_txt,
@@ -170,27 +345,34 @@ async def perguntar_org(
                 # Generate insights if requested
                 insights_payload = None
                 if p.enrich:
-                    # Convert resultado (dict format) to QueryResult (list format)
                     colunas = resultado.get("colunas", [])
                     dados_dict = resultado.get("dados", [])
-                    # Convert from List[Dict] to List[List] for pipeline compatibility
                     dados_list = [[row.get(col) for col in colunas] for row in dados_dict]
 
-                    enriched = enrichment_client.enrich(
+                    # Generate insights using new pipeline
+                    insights_text = generate_insights(
                         pergunta=p.pergunta,
-                        query_result=QueryResult(
+                        colunas=colunas,
+                        dados=dados_list,
+                        biz_context=biz_context
+                    )
+
+                    # Generate chart
+                    chart_data = None
+                    try:
+                        query_result = QueryResult(
                             sql=sql_seguro,
                             schema=schema,
                             colunas=colunas,
                             dados=dados_list
-                        ),
-                        biz_context=biz_context,
-                        generate_insights=True,
-                        generate_chart=True
-                    )
+                        )
+                        chart_data = generate_chart(query_result)
+                    except Exception as e:
+                        logger.warning(f"Chart generation failed: {e}")
+
                     insights_payload = {
-                        "summary": enriched.get("insights"),
-                        "chart": enriched.get("chart")
+                        "summary": insights_text,
+                        "chart": {"mime": "image/png", "base64": chart_data} if chart_data else None
                     }
 
                 return {

@@ -21,7 +21,7 @@ class OrgMember(SQLModel, table=True):
 
     user_id: str = Field(foreign_key="users.id", primary_key=True)
     org_id: str = Field(foreign_key="orgs.id", primary_key=True)
-    role_in_org: str = Field(default="member")  # 'org_admin' | 'member'
+    role_in_org: str = Field(default="member")  # 'admin' | 'member'
 
     # Relationships
     user: Optional["User"] = Relationship(back_populates="org_links")

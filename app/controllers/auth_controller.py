@@ -23,8 +23,6 @@ from app.models import User, Organization, OrgMember, OrgDbConnection, OrgAllowe
 from app.schemas import (
     RegisterRequest,
     RegisterResponse,
-    RegisterAdminRequest,
-    RegisterAdminResponse,
     LoginRequest,
     LoginResponse,
     AcceptInviteRequest,
@@ -77,7 +75,6 @@ def register(p: RegisterRequest, db: Session = Depends(get_db)):
         email=p.email,
         password_hash=hashed_pw,
         status="active",
-        role="user",  # Campo legado, não mais usado
         password_changed_at=datetime.utcnow()
     )
     db.add(user)
@@ -112,11 +109,11 @@ def register(p: RegisterRequest, db: Session = Depends(get_db)):
         )
         db.add(allowed_schema)
 
-    # Vincular user como org_admin
+    # Vincular user como admin da organização
     org_member = OrgMember(
         user_id=user_id,
         org_id=org_id,
-        role_in_org="org_admin"
+        role_in_org="admin"
     )
     db.add(org_member)
 
@@ -133,58 +130,6 @@ def register(p: RegisterRequest, db: Session = Depends(get_db)):
         email=user.email,
         org_id=org_id,
         org_name=org.name,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type="bearer"
-    )
-
-
-@router.post("/register-admin", response_model=RegisterAdminResponse)
-def register_admin(p: RegisterAdminRequest, db: Session = Depends(get_db)):
-    """
-    Registro de Platform Admin.
-
-    Cria um usuário com role='admin' (acesso total à plataforma).
-
-    ⚠️ ATENÇÃO: Em produção, este endpoint deve ser desabilitado
-    ou protegido com autenticação de superadmin.
-    """
-    # Verificar se email já existe
-    existing_user = db.exec(
-        select(User).where(User.email == p.email)
-    ).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=400,
-            detail="Email já cadastrado."
-        )
-
-    # Criar Platform Admin
-    user_id = str(uuid.uuid4())[:12]
-    hashed_pw = hash_password(p.password)
-
-    admin = User(
-        id=user_id,
-        name=p.name,
-        email=p.email,
-        password_hash=hashed_pw,
-        role="admin",  # ← Platform Admin
-        status="active",
-        password_changed_at=datetime.utcnow()
-    )
-    db.add(admin)
-    db.commit()
-    db.refresh(admin)
-
-    # Gerar tokens JWT
-    access_token = create_access_token(data={"sub": user_id})
-    refresh_token = create_refresh_token(data={"sub": user_id})
-
-    return RegisterAdminResponse(
-        user_id=user_id,
-        name=admin.name,
-        email=admin.email,
-        role=admin.role,
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer"
@@ -357,65 +302,6 @@ def refresh_access_token(p: RefreshTokenRequest):
     )
 
 
-@router.post("/admin-login", response_model=LoginResponse)
-def admin_login(p: LoginRequest, db: Session = Depends(get_db)):
-    """
-    Login exclusivo para Platform Admins (role='admin').
-
-    Diferença de Org Admin:
-    - Platform Admin (role='admin'): Acesso total à plataforma
-    - Org Admin (role_in_org='org_admin'): Acesso apenas à sua organização
-    """
-    # Buscar usuário por email
-    user = db.exec(
-        select(User).where(User.email == p.email)
-    ).first()
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="Email ou senha incorretos"
-        )
-
-    # Verificar se usuário tem senha cadastrada
-    if not user.password_hash:
-        raise HTTPException(
-            status_code=400,
-            detail="Usuário sem senha cadastrada"
-        )
-
-    # Verificar senha
-    if not verify_password(p.password, user.password_hash):
-        raise HTTPException(
-            status_code=401,
-            detail="Email ou senha incorretos"
-        )
-
-    # Verificar se é Platform Admin
-    if user.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Acesso restrito a Platform Admins. Use /auth/login para Org Admins."
-        )
-
-    # Verificar status
-    if user.status != "active":
-        raise HTTPException(
-            status_code=403,
-            detail=f"Usuário com status '{user.status}' não pode fazer login"
-        )
-
-    # Gerar tokens JWT
-    access_token = create_access_token(data={"sub": user.id})
-    refresh_token = create_refresh_token(data={"sub": user.id})
-
-    return LoginResponse(
-        user_id=user.id,
-        email=user.email,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type="bearer"
-    )
-
 @router.get("/debug/me")
 async def debug_current_user(
     u=Depends(get_current_user),
@@ -436,7 +322,6 @@ async def debug_current_user(
     return {
         "user_id": u.id,
         "email": u.email,
-        "role": u.role,
         "org_id_in_token": u.org_id,
         "org_member_exists": bool(org_link),
         "org_member_org_id": org_link.org_id if org_link else None,

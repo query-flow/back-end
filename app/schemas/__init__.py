@@ -1,13 +1,10 @@
-from .org_schema import AdminOrgCreate, AdminOrgResponse
-from .user_schema import AdminUserCreate, AdminUserResponse, AuthedUser, AdminOrgMemberAdd
+from .user_schema import AuthedUser
 from .query_schema import PerguntaOrg, PerguntaDireta
 from .document_schema import AdminDocManualCreate
 from .bootstrap_schema import PublicBootstrapOrg, PublicBootstrapResponse
 from .auth_schema import (
     RegisterRequest,
     RegisterResponse,
-    RegisterAdminRequest,
-    RegisterAdminResponse,
     LoginRequest,
     LoginResponse,
     AcceptInviteRequest,
@@ -26,12 +23,7 @@ from .member_schema import (
 )
 
 __all__ = [
-    "AdminOrgCreate",
-    "AdminOrgResponse",
-    "AdminUserCreate",
-    "AdminUserResponse",
     "AuthedUser",
-    "AdminOrgMemberAdd",
     "PerguntaOrg",
     "PerguntaDireta",
     "AdminDocManualCreate",
@@ -39,8 +31,6 @@ __all__ = [
     "PublicBootstrapResponse",
     "RegisterRequest",
     "RegisterResponse",
-    "RegisterAdminRequest",
-    "RegisterAdminResponse",
     "LoginRequest",
     "LoginResponse",
     "AcceptInviteRequest",

@@ -4,7 +4,7 @@ Encapsulates the full query execution pipeline
 """
 import time
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Callable
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -14,6 +14,7 @@ from app.dtos import (
     OrgContext,
     QueryExecutionContext,
     IntentAnalysisResult,
+    StreamEvent,
 )
 from app.repositories.clarification_repository import ClarificationRepository
 from app.repositories.audit_repository import AuditRepository
@@ -56,7 +57,8 @@ class QueryService:
     def execute_query(
         self,
         ctx: QueryExecutionContext,
-        org_ctx: OrgContext
+        org_ctx: OrgContext,
+        event_callback: Optional[Callable[[StreamEvent], None]] = None
     ) -> Dict[str, Any]:
         """
         Main entry point for query execution
@@ -65,18 +67,31 @@ class QueryService:
         1. New question → intent analysis → maybe clarification
         2. Clarification response → build clarified question → execute
 
+        Args:
+            ctx: Query execution context
+            org_ctx: Organization context
+            event_callback: Optional callback to emit progress events
+
         Returns:
             Response dict with results or clarification request
         """
         ctx.started_at = datetime.utcnow()
 
+        # Emit start event
+        if event_callback:
+            event_callback(StreamEvent(
+                stage="started",
+                progress=0,
+                message="Iniciando processamento da consulta"
+            ))
+
         try:
             # Flow 2: Clarification response
             if ctx.clarification_id:
-                return self._execute_clarification(ctx, org_ctx)
+                return self._execute_clarification(ctx, org_ctx, event_callback)
 
             # Flow 1: New question with intent check
-            return self._execute_new_question(ctx, org_ctx)
+            return self._execute_new_question(ctx, org_ctx, event_callback)
 
         finally:
             ctx.completed_at = datetime.utcnow()
@@ -84,7 +99,8 @@ class QueryService:
     def _execute_new_question(
         self,
         ctx: QueryExecutionContext,
-        org_ctx: OrgContext
+        org_ctx: OrgContext,
+        event_callback: Optional[Callable[[StreamEvent], None]] = None
     ) -> Dict[str, Any]:
         """
         Execute new question with intent analysis
@@ -96,6 +112,14 @@ class QueryService:
         4. If unclear → save clarification session → return questions
         5. If schema mismatch → return error with suggestions
         """
+        # Emit schema selection event
+        if event_callback:
+            event_callback(StreamEvent(
+                stage="selecting_schema",
+                progress=10,
+                message="Selecionando melhor schema"
+            ))
+
         # Select schema
         schema_order = self._select_schema_order(ctx, org_ctx)
 
@@ -104,10 +128,18 @@ class QueryService:
 
         for schema in schema_order:
             try:
-                result = self._execute_on_schema(ctx, org_ctx, schema)
+                result = self._execute_on_schema(ctx, org_ctx, schema, event_callback)
 
                 # Success! Log audit and return
                 self.audit_repo.log_from_context(org_ctx.org_id, ctx)
+
+                # Emit completion event
+                if event_callback:
+                    event_callback(StreamEvent(
+                        stage="completed",
+                        progress=100,
+                        message="Consulta executada com sucesso"
+                    ))
 
                 return result
 
@@ -129,7 +161,8 @@ class QueryService:
     def _execute_clarification(
         self,
         ctx: QueryExecutionContext,
-        org_ctx: OrgContext
+        org_ctx: OrgContext,
+        event_callback: Optional[Callable[[StreamEvent], None]] = None
     ) -> Dict[str, Any]:
         """
         Execute clarification response
@@ -144,6 +177,14 @@ class QueryService:
         """
         # Load session
         session = self.clarification_repo.get_session(ctx.clarification_id)
+
+        # Emit clarification processing event
+        if event_callback:
+            event_callback(StreamEvent(
+                stage="processing_clarification",
+                progress=20,
+                message="Processando respostas de clarificação"
+            ))
 
         # Build clarified question
         clarified_question = build_clarified_question(
@@ -164,16 +205,41 @@ class QueryService:
             catalog = catalog_for_current_db(conn, db_name=schema)
             esquema_txt = esquema_resumido(catalog)
 
+            # Emit SQL generation event
+            if event_callback:
+                event_callback(StreamEvent(
+                    stage="generating_sql",
+                    progress=40,
+                    message="Gerando consulta SQL"
+                ))
+
             # Generate SQL (skip intent analysis)
             ctx.pergunta = clarified_question
             sql = generate_sql(clarified_question, esquema_txt, ctx.max_linhas)
             ctx.sql_generated = sql
+
+            # Emit execution event
+            if event_callback:
+                event_callback(StreamEvent(
+                    stage="executing_sql",
+                    progress=60,
+                    message="Executando consulta no banco de dados",
+                    data={"sql": sql}
+                ))
 
             # Execute with retry
             self._execute_sql_with_retry(conn, sql, esquema_txt, catalog, schema, ctx)
 
         # Enrich if requested
         if ctx.enrich:
+            # Emit enrichment event
+            if event_callback:
+                event_callback(StreamEvent(
+                    stage="enriching",
+                    progress=80,
+                    message="Gerando insights e gráficos"
+                ))
+
             self.enrichment_service.enrich_results(ctx, org_ctx)
 
         # Clean up session
@@ -182,6 +248,14 @@ class QueryService:
         # Log audit
         self.audit_repo.log_from_context(org_ctx.org_id, ctx)
 
+        # Emit completion event
+        if event_callback:
+            event_callback(StreamEvent(
+                stage="completed",
+                progress=100,
+                message="Consulta executada com sucesso"
+            ))
+
         # Build response
         return self._build_response(org_ctx.org_id, ctx)
 
@@ -189,7 +263,8 @@ class QueryService:
         self,
         ctx: QueryExecutionContext,
         org_ctx: OrgContext,
-        schema: str
+        schema: str,
+        event_callback: Optional[Callable[[StreamEvent], None]] = None
     ) -> Dict[str, Any]:
         """
         Try executing query on a specific schema
@@ -209,6 +284,14 @@ class QueryService:
             # Get schema
             catalog = catalog_for_current_db(conn, db_name=schema)
             esquema_txt = esquema_resumido(catalog)
+
+            # Emit intent analysis event
+            if event_callback:
+                event_callback(StreamEvent(
+                    stage="analyzing_intent",
+                    progress=20,
+                    message="Analisando intenção da pergunta"
+                ))
 
             # Analyze intent
             intent = analyze_intent(
@@ -233,15 +316,40 @@ class QueryService:
                 logger.warning(f"Low confidence ({intent.confidence:.2f}), requesting clarification")
                 return self._request_clarification(intent, schema, ctx, org_ctx)
 
+            # Emit SQL generation event
+            if event_callback:
+                event_callback(StreamEvent(
+                    stage="generating_sql",
+                    progress=40,
+                    message="Gerando consulta SQL"
+                ))
+
             # Intent is clear, generate SQL
             sql = generate_sql(ctx.pergunta, esquema_txt, ctx.max_linhas)
             ctx.sql_generated = sql
+
+            # Emit execution event
+            if event_callback:
+                event_callback(StreamEvent(
+                    stage="executing_sql",
+                    progress=60,
+                    message="Executando consulta no banco de dados",
+                    data={"sql": sql}
+                ))
 
             # Execute with retry
             self._execute_sql_with_retry(conn, sql, esquema_txt, catalog, schema, ctx)
 
         # Enrich if requested
         if ctx.enrich:
+            # Emit enrichment event
+            if event_callback:
+                event_callback(StreamEvent(
+                    stage="enriching",
+                    progress=80,
+                    message="Gerando insights e gráficos"
+                ))
+
             self.enrichment_service.enrich_results(ctx, org_ctx)
 
         # Build response

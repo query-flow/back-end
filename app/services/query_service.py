@@ -1,0 +1,396 @@
+"""
+Service for query execution orchestration
+Encapsulates the full query execution pipeline
+"""
+import time
+import logging
+from typing import Optional, Dict, Any, Tuple
+from datetime import datetime
+from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Connection
+
+from app.dtos import (
+    OrgContext,
+    QueryExecutionContext,
+    IntentAnalysisResult,
+)
+from app.repositories.clarification_repository import ClarificationRepository
+from app.repositories.audit_repository import AuditRepository
+from app.services.enrichment_service import EnrichmentService
+from app.pipeline.stages import (
+    analyze_intent,
+    generate_sql,
+    correct_sql,
+    build_clarified_question,
+    pick_schema,
+)
+from app.pipeline.sql import (
+    catalog_for_current_db,
+    esquema_resumido,
+    get_schema_index_for_org,
+    rank_schemas_by_overlap,
+    proteger_sql_singledb,
+    executar_sql_readonly_on_conn,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class QueryService:
+    """
+    Orchestrates query execution pipeline
+    Handles intent analysis, SQL generation, execution, and enrichment
+    """
+
+    def __init__(
+        self,
+        clarification_repo: ClarificationRepository,
+        audit_repo: AuditRepository,
+        enrichment_service: EnrichmentService
+    ):
+        self.clarification_repo = clarification_repo
+        self.audit_repo = audit_repo
+        self.enrichment_service = enrichment_service
+
+    def execute_query(
+        self,
+        ctx: QueryExecutionContext,
+        org_ctx: OrgContext
+    ) -> Dict[str, Any]:
+        """
+        Main entry point for query execution
+
+        Handles two flows:
+        1. New question → intent analysis → maybe clarification
+        2. Clarification response → build clarified question → execute
+
+        Returns:
+            Response dict with results or clarification request
+        """
+        ctx.started_at = datetime.utcnow()
+
+        try:
+            # Flow 2: Clarification response
+            if ctx.clarification_id:
+                return self._execute_clarification(ctx, org_ctx)
+
+            # Flow 1: New question with intent check
+            return self._execute_new_question(ctx, org_ctx)
+
+        finally:
+            ctx.completed_at = datetime.utcnow()
+
+    def _execute_new_question(
+        self,
+        ctx: QueryExecutionContext,
+        org_ctx: OrgContext
+    ) -> Dict[str, Any]:
+        """
+        Execute new question with intent analysis
+
+        Flow:
+        1. Select best schema
+        2. Analyze intent
+        3. If clear → generate SQL → execute
+        4. If unclear → save clarification session → return questions
+        5. If schema mismatch → return error with suggestions
+        """
+        # Select schema
+        schema_order = self._select_schema_order(ctx, org_ctx)
+
+        # Try executing on schemas in order
+        last_error: Optional[str] = None
+
+        for schema in schema_order:
+            try:
+                result = self._execute_on_schema(ctx, org_ctx, schema)
+
+                # Success! Log audit and return
+                self.audit_repo.log_from_context(org_ctx.org_id, ctx)
+
+                return result
+
+            except HTTPException as e:
+                last_error = f"[{schema}] {e.detail}"
+                logger.warning(f"Failed on schema {schema}: {e.detail}")
+                continue
+            except Exception as e:
+                last_error = f"[{schema}] {str(e)}"
+                logger.warning(f"Failed on schema {schema}: {e}")
+                continue
+
+        # All schemas failed
+        raise HTTPException(
+            status_code=400,
+            detail=last_error or "Falha ao executar em todos os schemas permitidos."
+        )
+
+    def _execute_clarification(
+        self,
+        ctx: QueryExecutionContext,
+        org_ctx: OrgContext
+    ) -> Dict[str, Any]:
+        """
+        Execute clarification response
+
+        Flow:
+        1. Load clarification session
+        2. Build clarified question
+        3. Generate SQL (skip intent analysis)
+        4. Execute SQL
+        5. Enrich if requested
+        6. Delete clarification session
+        """
+        # Load session
+        session = self.clarification_repo.get_session(ctx.clarification_id)
+
+        # Build clarified question
+        clarified_question = build_clarified_question(
+            session.original_question,
+            ctx.clarifications or {}
+        )
+
+        # Use schema from session
+        schema = session.schema_name
+        ctx.schema_used = schema
+
+        # Connect and execute
+        db_url = org_ctx.build_sqlalchemy_url(schema)
+        eng = create_engine(db_url, pool_pre_ping=True, future=True)
+
+        with eng.connect() as conn:
+            # Get schema
+            catalog = catalog_for_current_db(conn, db_name=schema)
+            esquema_txt = esquema_resumido(catalog)
+
+            # Generate SQL (skip intent analysis)
+            ctx.pergunta = clarified_question
+            sql = generate_sql(clarified_question, esquema_txt, ctx.max_linhas)
+            ctx.sql_generated = sql
+
+            # Execute with retry
+            self._execute_sql_with_retry(conn, sql, esquema_txt, catalog, schema, ctx)
+
+        # Enrich if requested
+        if ctx.enrich:
+            self.enrichment_service.enrich_results(ctx, org_ctx)
+
+        # Clean up session
+        self.clarification_repo.delete_session(ctx.clarification_id)
+
+        # Log audit
+        self.audit_repo.log_from_context(org_ctx.org_id, ctx)
+
+        # Build response
+        return self._build_response(org_ctx.org_id, ctx)
+
+    def _execute_on_schema(
+        self,
+        ctx: QueryExecutionContext,
+        org_ctx: OrgContext,
+        schema: str
+    ) -> Dict[str, Any]:
+        """
+        Try executing query on a specific schema
+
+        Returns:
+            Response dict if successful
+        Raises:
+            HTTPException if fails (to try next schema)
+        """
+        ctx.schema_used = schema
+
+        # Connect
+        db_url = org_ctx.build_sqlalchemy_url(schema)
+        eng = create_engine(db_url, pool_pre_ping=True, future=True)
+
+        with eng.connect() as conn:
+            # Get schema
+            catalog = catalog_for_current_db(conn, db_name=schema)
+            esquema_txt = esquema_resumido(catalog)
+
+            # Analyze intent
+            intent = analyze_intent(
+                pergunta=ctx.pergunta,
+                esquema=esquema_txt,
+                confidence_threshold=0.5
+            )
+
+            # Check schema mismatch
+            if intent.schema_mismatch:
+                logger.warning(f"Schema mismatch: {intent.missing_data}")
+                return {
+                    "status": "schema_error",
+                    "message": "Desculpe, esses dados não estão disponíveis no sistema.",
+                    "missing_data": intent.missing_data,
+                    "suggestions": intent.questions[0]["options"] if intent.questions else [],
+                    "confidence": intent.confidence
+                }
+
+            # Check if clarification needed
+            if not intent.is_clear:
+                logger.warning(f"Low confidence ({intent.confidence:.2f}), requesting clarification")
+                return self._request_clarification(intent, schema, ctx, org_ctx)
+
+            # Intent is clear, generate SQL
+            sql = generate_sql(ctx.pergunta, esquema_txt, ctx.max_linhas)
+            ctx.sql_generated = sql
+
+            # Execute with retry
+            self._execute_sql_with_retry(conn, sql, esquema_txt, catalog, schema, ctx)
+
+        # Enrich if requested
+        if ctx.enrich:
+            self.enrichment_service.enrich_results(ctx, org_ctx)
+
+        # Build response
+        return self._build_response(org_ctx.org_id, ctx)
+
+    def _execute_sql_with_retry(
+        self,
+        conn: Connection,
+        sql: str,
+        esquema_txt: str,
+        catalog: Dict,
+        schema: str,
+        ctx: QueryExecutionContext
+    ) -> None:
+        """
+        Execute SQL with retry on error
+
+        Modifies ctx in place with results
+        """
+        # Protect SQL
+        try:
+            sql_seguro = proteger_sql_singledb(sql, catalog, db_name=schema, max_linhas=ctx.max_linhas)
+        except HTTPException as e:
+            msg = str(e.detail)
+            if "Tabela(s) não encontrada(s)" in msg or "multi-DB" in msg:
+                raise  # Let caller try next schema
+            raise
+
+        # Execute
+        t0 = time.time()
+
+        try:
+            resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
+        except Exception as err:
+            # Retry with correction
+            logger.warning(f"SQL error, attempting correction: {err}")
+            sql2 = correct_sql(
+                sql_original=sql_seguro,
+                erro=str(err),
+                esquema=esquema_txt,
+                limit=ctx.max_linhas
+            )
+            sql_seguro = proteger_sql_singledb(sql2, catalog, db_name=schema, max_linhas=ctx.max_linhas)
+            resultado = executar_sql_readonly_on_conn(conn, sql_seguro)
+
+        ctx.duration_ms = int((time.time() - t0) * 1000)
+        ctx.sql_executed = sql_seguro
+
+        # Parse results
+        ctx.colunas = resultado.get("colunas", [])
+        dados_dict = resultado.get("dados", [])
+        ctx.dados = [[row.get(col) for col in ctx.colunas] for row in dados_dict]
+        ctx.row_count = len(ctx.dados)
+
+        logger.info(f"SQL executed successfully: {ctx.row_count} rows in {ctx.duration_ms}ms")
+
+    def _request_clarification(
+        self,
+        intent: Any,
+        schema: str,
+        ctx: QueryExecutionContext,
+        org_ctx: OrgContext
+    ) -> Dict[str, Any]:
+        """
+        Save clarification session and return questions to user
+        """
+        intent_result = IntentAnalysisResult(
+            confidence=intent.confidence,
+            is_clear=intent.is_clear,
+            schema_mismatch=intent.schema_mismatch,
+            ambiguities=intent.ambiguities,
+            questions=intent.questions,
+            missing_data=intent.missing_data,
+            analyzed_at=datetime.utcnow(),
+            schema_used=schema
+        )
+
+        session = self.clarification_repo.create_session(
+            org_id=org_ctx.org_id,
+            user_id="",  # TODO: get from ctx
+            original_question=ctx.pergunta,
+            schema_name=schema,
+            intent_analysis=intent_result
+        )
+
+        return {
+            "status": "needs_clarification",
+            "clarification_id": session.id,
+            "message": "Preciso de mais detalhes para gerar uma consulta precisa:",
+            "questions": intent.questions,
+            "ambiguities": intent.ambiguities,
+            "confidence": intent.confidence
+        }
+
+    def _select_schema_order(
+        self,
+        ctx: QueryExecutionContext,
+        org_ctx: OrgContext
+    ) -> list[str]:
+        """
+        Select order to try schemas
+
+        Uses overlap ranking + LLM tie-breaking
+        """
+        # Build schema index
+        base_url = org_ctx.build_sqlalchemy_url(org_ctx.database_name)
+        schema_index = get_schema_index_for_org(
+            org_ctx.org_id,
+            base_url,
+            org_ctx.allowed_schemas
+        )
+
+        # Rank by overlap
+        ranked = rank_schemas_by_overlap(schema_index, ctx.pergunta)
+        best_by_overlap, top_score = ranked[0]
+        top_ties = [s for s, sc in ranked if sc == top_score]
+
+        # Use LLM to pick if ambiguous
+        if top_score == 0 or len(top_ties) > 1:
+            picked = pick_schema(org_ctx.allowed_schemas, ctx.pergunta)
+            preferred = picked or best_by_overlap
+        else:
+            preferred = best_by_overlap
+
+        # Return order: preferred first, then others
+        return [preferred] + [s for s in org_ctx.allowed_schemas if s != preferred]
+
+    def _build_response(self, org_id: str, ctx: QueryExecutionContext) -> Dict[str, Any]:
+        """
+        Build final response dict
+        """
+        response = {
+            "org_id": org_id,
+            "schema_usado": ctx.schema_used,
+            "sql": ctx.sql_executed,
+            "resultado": {
+                "colunas": ctx.colunas,
+                "dados": ctx.dados
+            }
+        }
+
+        # Add insights if available
+        if ctx.insights_text or ctx.chart_base64:
+            response["insights"] = {
+                "summary": ctx.insights_text,
+                "chart": {
+                    "mime": "image/png",
+                    "base64": ctx.chart_base64
+                } if ctx.chart_base64 else None
+            }
+
+        return response

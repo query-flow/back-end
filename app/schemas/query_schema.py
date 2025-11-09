@@ -11,6 +11,9 @@ class PerguntaOrg(BaseModel):
     clarification_id: Optional[str] = None
     clarifications: Optional[dict] = None
 
+    # For conversation flow
+    conversation_id: Optional[str] = None
+
 
 class PerguntaDireta(BaseModel):
     database_url: str

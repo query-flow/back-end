@@ -21,6 +21,14 @@ from .member_schema import (
     UpdateMemberRoleResponse,
     RemoveMemberResponse,
 )
+from .conversation_schema import (
+    CreateConversationRequest,
+    ConversationResponse,
+    ListConversationsResponse,
+    MessageResponse,
+    ConversationHistoryResponse,
+    AskInConversationRequest,
+)
 
 __all__ = [
     "AuthedUser",
@@ -44,4 +52,10 @@ __all__ = [
     "UpdateMemberRoleRequest",
     "UpdateMemberRoleResponse",
     "RemoveMemberResponse",
+    "CreateConversationRequest",
+    "ConversationResponse",
+    "ListConversationsResponse",
+    "MessageResponse",
+    "ConversationHistoryResponse",
+    "AskInConversationRequest",
 ]

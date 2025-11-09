@@ -11,6 +11,7 @@ from app.controllers import (
     documents_controller,
     members_controller,
     queries_controller,
+    conversations_controller,
 )
 
 # Create FastAPI app
@@ -29,6 +30,7 @@ def startup():
 app.include_router(auth_controller.router)  # JWT authentication endpoints (public)
 app.include_router(members_controller.router)  # Member management (admin only)
 app.include_router(queries_controller.router)
+app.include_router(conversations_controller.router)  # Conversation management
 app.include_router(documents_controller.router)
 
 

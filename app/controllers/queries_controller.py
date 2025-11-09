@@ -12,7 +12,7 @@ from app.core.database import get_db
 from app.core.auth import get_current_user, get_user_org_id
 from app.schemas import PerguntaOrg, AuthedUser
 from app.dtos import QueryExecutionContext, StreamEvent
-from app.repositories import OrgRepository, ClarificationRepository, AuditRepository
+from app.repositories import OrgRepository, ClarificationRepository, AuditRepository, ConversationRepository
 from app.services import QueryService, EnrichmentService
 from app.core.streaming import format_sse
 
@@ -57,15 +57,22 @@ async def perguntar_org(
     clarification_repo = ClarificationRepository(db)
     audit_repo = AuditRepository(db)
     enrichment_service = EnrichmentService()
+    conversation_repo = ConversationRepository(db) if p.conversation_id else None
 
     query_service = QueryService(
         clarification_repo=clarification_repo,
         audit_repo=audit_repo,
-        enrichment_service=enrichment_service
+        enrichment_service=enrichment_service,
+        conversation_repo=conversation_repo
     )
 
     # 5. Execute query (all business logic in service)
-    result = query_service.execute_query(ctx, org_ctx)
+    result = query_service.execute_query(
+        ctx=ctx,
+        org_ctx=org_ctx,
+        user_id=u.sub,
+        conversation_id=p.conversation_id
+    )
 
     return result
 
@@ -113,11 +120,13 @@ async def perguntar_org_stream(
     clarification_repo = ClarificationRepository(db)
     audit_repo = AuditRepository(db)
     enrichment_service = EnrichmentService()
+    conversation_repo = ConversationRepository(db) if p.conversation_id else None
 
     query_service = QueryService(
         clarification_repo=clarification_repo,
         audit_repo=audit_repo,
-        enrichment_service=enrichment_service
+        enrichment_service=enrichment_service,
+        conversation_repo=conversation_repo
     )
 
     # 5. Create event queue for streaming
@@ -138,7 +147,13 @@ async def perguntar_org_stream(
                 try:
                     result = await loop.run_in_executor(
                         None,
-                        lambda: query_service.execute_query(ctx, org_ctx, emit_event)
+                        lambda: query_service.execute_query(
+                            ctx=ctx,
+                            org_ctx=org_ctx,
+                            event_callback=emit_event,
+                            user_id=u.sub,
+                            conversation_id=p.conversation_id
+                        )
                     )
                     # Signal completion with None
                     await event_queue.put(None)

@@ -18,6 +18,7 @@ from app.dtos import (
 )
 from app.repositories.clarification_repository import ClarificationRepository
 from app.repositories.audit_repository import AuditRepository
+from app.repositories.conversation_repository import ConversationRepository
 from app.services.enrichment_service import EnrichmentService
 from app.pipeline.stages import (
     analyze_intent,
@@ -48,34 +49,53 @@ class QueryService:
         self,
         clarification_repo: ClarificationRepository,
         audit_repo: AuditRepository,
-        enrichment_service: EnrichmentService
+        enrichment_service: EnrichmentService,
+        conversation_repo: Optional[ConversationRepository] = None
     ):
         self.clarification_repo = clarification_repo
         self.audit_repo = audit_repo
         self.enrichment_service = enrichment_service
+        self.conversation_repo = conversation_repo
 
     def execute_query(
         self,
         ctx: QueryExecutionContext,
         org_ctx: OrgContext,
-        event_callback: Optional[Callable[[StreamEvent], None]] = None
+        event_callback: Optional[Callable[[StreamEvent], None]] = None,
+        user_id: Optional[str] = None,
+        conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Main entry point for query execution
 
-        Handles two flows:
+        Handles three flows:
         1. New question → intent analysis → maybe clarification
         2. Clarification response → build clarified question → execute
+        3. Conversation → load history → execute with context
 
         Args:
             ctx: Query execution context
             org_ctx: Organization context
             event_callback: Optional callback to emit progress events
+            user_id: User ID (for conversation tracking)
+            conversation_id: Optional conversation ID for context
 
         Returns:
             Response dict with results or clarification request
         """
         ctx.started_at = datetime.utcnow()
+
+        # Load conversation history if conversation_id provided
+        if conversation_id and self.conversation_repo:
+            try:
+                history = self.conversation_repo.get_conversation_history_for_llm(
+                    conversation_id,
+                    max_messages=10
+                )
+                ctx.conversation_history = history
+                logger.info(f"Loaded {len(history)} messages from conversation {conversation_id}")
+            except Exception as e:
+                logger.warning(f"Failed to load conversation history: {e}")
 
         # Emit start event
         if event_callback:
@@ -88,10 +108,20 @@ class QueryService:
         try:
             # Flow 2: Clarification response
             if ctx.clarification_id:
-                return self._execute_clarification(ctx, org_ctx, event_callback)
+                result = self._execute_clarification(ctx, org_ctx, event_callback)
+            else:
+                # Flow 1 & 3: New question with intent check (with or without history)
+                result = self._execute_new_question(ctx, org_ctx, event_callback)
 
-            # Flow 1: New question with intent check
-            return self._execute_new_question(ctx, org_ctx, event_callback)
+            # Save to conversation if conversation_id provided
+            if conversation_id and self.conversation_repo and user_id:
+                self._save_to_conversation(
+                    conversation_id=conversation_id,
+                    ctx=ctx,
+                    result=result
+                )
+
+            return result
 
         finally:
             ctx.completed_at = datetime.utcnow()
@@ -502,3 +532,49 @@ class QueryService:
             }
 
         return response
+
+    def _save_to_conversation(
+        self,
+        conversation_id: str,
+        ctx: QueryExecutionContext,
+        result: Dict[str, Any]
+    ) -> None:
+        """
+        Save user question and assistant response to conversation
+
+        Args:
+            conversation_id: Conversation ID
+            ctx: Query execution context
+            result: Query result dict
+        """
+        try:
+            # Save user message
+            self.conversation_repo.add_message(
+                conversation_id=conversation_id,
+                role="user",
+                content=ctx.pergunta
+            )
+
+            # Format assistant response
+            if result.get("status") == "success" and result.get("resultado"):
+                assistant_content = f"Executei a consulta: {ctx.sql_executed or ctx.sql_generated}\n\n"
+                assistant_content += f"Resultado: {ctx.row_count or len(ctx.dados or [])} linhas retornadas"
+
+                if ctx.insights_text:
+                    assistant_content += f"\n\n{ctx.insights_text}"
+
+                # Save assistant message
+                self.conversation_repo.add_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=assistant_content,
+                    sql_executed=ctx.sql_executed or ctx.sql_generated,
+                    schema_used=ctx.schema_used,
+                    row_count=ctx.row_count or (len(ctx.dados) if ctx.dados else None),
+                    duration_ms=ctx.duration_ms
+                )
+
+                logger.info(f"Saved messages to conversation {conversation_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to save to conversation: {e}", exc_info=True)

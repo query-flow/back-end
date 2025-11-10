@@ -70,7 +70,7 @@ async def perguntar_org(
     result = query_service.execute_query(
         ctx=ctx,
         org_ctx=org_ctx,
-        user_id=u.sub,
+        user_id=u.id,
         conversation_id=p.conversation_id
     )
 
@@ -151,7 +151,7 @@ async def perguntar_org_stream(
                             ctx=ctx,
                             org_ctx=org_ctx,
                             event_callback=emit_event,
-                            user_id=u.sub,
+                            user_id=u.id,
                             conversation_id=p.conversation_id
                         )
                     )

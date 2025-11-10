@@ -434,6 +434,7 @@ class QueryService:
         ctx.dados = [[row.get(col) for col in ctx.colunas] for row in dados_dict]
         ctx.row_count = len(ctx.dados)
 
+        logger.info(f"SQL executed: {sql_seguro}")
         logger.info(f"SQL executed successfully: {ctx.row_count} rows in {ctx.duration_ms}ms")
 
     def _request_clarification(
@@ -510,14 +511,32 @@ class QueryService:
     def _build_response(self, org_id: str, ctx: QueryExecutionContext) -> Dict[str, Any]:
         """
         Build final response dict
+
+        Standardized format:
+        {
+            "status": "success",
+            "sql": "SELECT ...",
+            "columns": ["col1", "col2"],
+            "rows": [[val1, val2], ...],
+            "insights": "text summary" or {"summary": "...", "chart": {...}},
+            "metadata": {
+                "org_id": "uuid",
+                "row_count": 10,
+                "duration_ms": 45,
+                "schema_used": "sakila"
+            }
+        }
         """
         response = {
-            "org_id": org_id,
-            "schema_usado": ctx.schema_used,
+            "status": "success",
             "sql": ctx.sql_executed,
-            "resultado": {
-                "colunas": ctx.colunas,
-                "dados": ctx.dados
+            "columns": ctx.colunas or [],
+            "rows": ctx.dados or [],
+            "metadata": {
+                "org_id": org_id,
+                "row_count": ctx.row_count or (len(ctx.dados) if ctx.dados else 0),
+                "duration_ms": ctx.duration_ms,
+                "schema_used": ctx.schema_used
             }
         }
 
@@ -530,6 +549,8 @@ class QueryService:
                     "base64": ctx.chart_base64
                 } if ctx.chart_base64 else None
             }
+        else:
+            response["insights"] = None
 
         return response
 

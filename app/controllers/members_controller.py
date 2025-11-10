@@ -77,6 +77,14 @@ def invite_member(
     if not org:
         raise HTTPException(status_code=404, detail="Organização não encontrada")
 
+    # Validar role_in_org
+    role = p.role_in_org or "member"
+    if role not in ("admin", "member"):
+        raise HTTPException(
+            status_code=400,
+            detail="Role inválida. Use 'admin' ou 'member'"
+        )
+
     # Gerar invite token
     invite_token = generate_invite_token()
     invite_expires = datetime.utcnow() + timedelta(days=7)
@@ -94,12 +102,12 @@ def invite_member(
     )
     db.add(user)
 
-    # CONTROLLER chama MODEL
+    # CONTROLLER chama MODEL com role especificada
     org_member = OrgMember.create(
         db=db,
         user_id=user_id,
         org_id=org_id,
-        role_in_org="member"
+        role_in_org=role
     )
 
     db.commit()

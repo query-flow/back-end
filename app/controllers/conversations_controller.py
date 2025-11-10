@@ -44,7 +44,7 @@ async def create_conversation(
     If title not provided, it will be auto-generated from first question
     """
     org_id = get_user_org_id(u)
-    user_id = u.sub
+    user_id = u.id
 
     conv_repo = ConversationRepository(db)
 
@@ -78,7 +78,7 @@ async def list_conversations(
     Returns conversations ordered by updated_at (most recent first)
     """
     org_id = get_user_org_id(u)
-    user_id = u.sub
+    user_id = u.id
 
     conv_repo = ConversationRepository(db)
 
@@ -118,7 +118,7 @@ async def get_conversation_history(
     """
     Get full conversation history with all messages
     """
-    user_id = u.sub
+    user_id = u.id
 
     conv_repo = ConversationRepository(db)
 
@@ -168,7 +168,7 @@ async def ask_in_conversation(
     for better understanding of follow-up questions
     """
     org_id = get_user_org_id(u)
-    user_id = u.sub
+    user_id = u.id
 
     # Validate conversation exists and user owns it
     conv_repo = ConversationRepository(db)
@@ -230,7 +230,7 @@ async def delete_conversation(
     """
     Delete a conversation and all its messages
     """
-    user_id = u.sub
+    user_id = u.id
 
     conv_repo = ConversationRepository(db)
     conv_repo.delete_conversation(conversation_id, user_id)

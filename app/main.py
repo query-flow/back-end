@@ -8,6 +8,7 @@ from app.core.security import sha256_hex
 from app.models import User
 from app.controllers import (
     auth_controller,
+    database_controller,
     documents_controller,
     members_controller,
     queries_controller,
@@ -28,6 +29,7 @@ def startup():
 
 # Include routers
 app.include_router(auth_controller.router)  # JWT authentication endpoints (public)
+app.include_router(database_controller.router)  # Database discovery (public, for setup)
 app.include_router(members_controller.router)  # Member management (admin only)
 app.include_router(queries_controller.router)
 app.include_router(conversations_controller.router)  # Conversation management

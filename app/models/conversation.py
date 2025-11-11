@@ -76,4 +76,8 @@ class ConversationMessage(SQLModel, table=True):
     row_count: Optional[int] = None
     duration_ms: Optional[int] = None
 
+    # Additional data from quick mode saves
+    table_data: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))  # {columns: [], rows: []}
+    insights: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))  # {summary: str, chart: {...}}
+
     created_at: datetime

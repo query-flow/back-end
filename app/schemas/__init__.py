@@ -28,6 +28,7 @@ from .conversation_schema import (
     MessageResponse,
     ConversationHistoryResponse,
     AskInConversationRequest,
+    AddMessageRequest,
 )
 
 __all__ = [
@@ -58,4 +59,5 @@ __all__ = [
     "MessageResponse",
     "ConversationHistoryResponse",
     "AskInConversationRequest",
+    "AddMessageRequest",
 ]

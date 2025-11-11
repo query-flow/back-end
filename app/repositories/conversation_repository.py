@@ -120,7 +120,9 @@ class ConversationRepository:
         sql_executed: Optional[str] = None,
         schema_used: Optional[str] = None,
         row_count: Optional[int] = None,
-        duration_ms: Optional[int] = None
+        duration_ms: Optional[int] = None,
+        table_data: Optional[Dict[str, Any]] = None,
+        insights: Optional[Dict[str, Any]] = None
     ) -> ConversationMessage:
         """
         Add message to conversation
@@ -133,6 +135,8 @@ class ConversationRepository:
             schema_used: Schema name (for assistant messages)
             row_count: Number of rows returned (for assistant messages)
             duration_ms: Query duration (for assistant messages)
+            table_data: Table data with columns and rows (for quick mode saves)
+            insights: Insights with summary and chart (for quick mode saves)
 
         Returns:
             Created message
@@ -146,6 +150,8 @@ class ConversationRepository:
             schema_used=schema_used,
             row_count=row_count,
             duration_ms=duration_ms,
+            table_data=table_data,
+            insights=insights,
             created_at=datetime.utcnow()
         )
 

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
@@ -32,6 +32,8 @@ class MessageResponse(BaseModel):
     schema_used: Optional[str] = None
     row_count: Optional[int] = None
     duration_ms: Optional[int] = None
+    table_data: Optional[Dict[str, Any]] = None  # {columns: [], rows: []}
+    insights: Optional[Dict[str, Any]] = None  # {summary: str, chart: {...}}
     created_at: datetime
 
 
@@ -46,3 +48,12 @@ class AskInConversationRequest(BaseModel):
     pergunta: str
     max_linhas: int = 100
     enrich: bool = True
+
+
+class AddMessageRequest(BaseModel):
+    """Add a message to an existing conversation (for saving quick mode chats)"""
+    role: str  # "user" or "assistant"
+    content: str
+    sql: Optional[str] = None  # Frontend sends "sql" not "sql_executed"
+    table_data: Optional[Dict[str, Any]] = None  # {columns: [], rows: []}
+    insights: Optional[Dict[str, Any]] = None  # {summary: str, chart: {...}}

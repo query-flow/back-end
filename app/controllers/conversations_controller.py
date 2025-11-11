@@ -17,6 +17,7 @@ from app.schemas import (
     MessageResponse,
     ConversationHistoryResponse,
     AskInConversationRequest,
+    AddMessageRequest,
 )
 from app.repositories import (
     OrgRepository,
@@ -137,6 +138,8 @@ async def get_conversation_history(
             schema_used=msg.schema_used,
             row_count=msg.row_count,
             duration_ms=msg.duration_ms,
+            table_data=msg.table_data,
+            insights=msg.insights,
             created_at=msg.created_at
         )
         for msg in messages
@@ -219,6 +222,52 @@ async def ask_in_conversation(
         db.commit()
 
     return result
+
+
+@router.post("/conversations/{conversation_id}/messages", response_model=MessageResponse)
+async def add_message_to_conversation(
+    conversation_id: str,
+    req: AddMessageRequest,
+    u: AuthedUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Add a message to an existing conversation
+
+    Used for saving quick mode conversations with all their messages
+    (including table data and insights)
+    """
+    user_id = u.id
+
+    conv_repo = ConversationRepository(db)
+
+    # Validate conversation exists and user owns it
+    conversation = conv_repo.get_conversation(conversation_id, user_id)
+
+    # Add message with all data
+    message = conv_repo.add_message(
+        conversation_id=conversation_id,
+        role=req.role,
+        content=req.content,
+        sql_executed=req.sql,  # Frontend sends "sql", backend stores as "sql_executed"
+        table_data=req.table_data,
+        insights=req.insights
+    )
+
+    logger.info(f"Added message {message.id} to conversation {conversation_id}")
+
+    return MessageResponse(
+        id=message.id,
+        role=message.role,
+        content=message.content,
+        sql_executed=message.sql_executed,
+        schema_used=message.schema_used,
+        row_count=message.row_count,
+        duration_ms=message.duration_ms,
+        table_data=message.table_data,
+        insights=message.insights,
+        created_at=message.created_at
+    )
 
 
 @router.delete("/conversations/{conversation_id}")

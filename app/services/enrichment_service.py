@@ -46,14 +46,14 @@ class EnrichmentService:
 
         # Generate chart
         try:
-            ctx.chart_base64 = self._generate_chart(ctx)
-            if ctx.chart_base64:
-                logger.info("Chart generated successfully")
+            ctx.chart_spec = self._generate_chart(ctx)
+            if ctx.chart_spec:
+                logger.info("Chart spec generated successfully")
             else:
                 logger.debug("No chart generated (data not suitable)")
         except Exception as e:
             logger.warning(f"Failed to generate chart: {e}")
-            ctx.chart_base64 = None
+            ctx.chart_spec = None
 
     def _generate_insights(
         self,
@@ -75,12 +75,13 @@ class EnrichmentService:
     def _generate_chart(
         self,
         ctx: QueryExecutionContext
-    ) -> Optional[str]:
+    ) -> Optional[dict]:
         """
-        Generate chart from query results
+        Generate interactive chart specification from query results
 
         Returns:
-            Base64 encoded PNG or None if not suitable for charting
+            Chart spec dict with type, data, config, and recommendation_reason
+            or None if not suitable for charting
         """
         if not ctx.sql_executed or not ctx.schema_used:
             return None

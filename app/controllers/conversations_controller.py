@@ -194,11 +194,15 @@ async def ask_in_conversation(
     audit_repo = AuditRepository(db)
     enrichment_service = EnrichmentService()
 
+    from app.repositories.query_history_repository import QueryHistoryRepository
+    query_history_repo = QueryHistoryRepository(db)
+
     query_service = QueryService(
         clarification_repo=clarification_repo,
         audit_repo=audit_repo,
         enrichment_service=enrichment_service,
-        conversation_repo=conv_repo
+        conversation_repo=conv_repo,
+        query_history_repo=query_history_repo
     )
 
     # Execute query with conversation context

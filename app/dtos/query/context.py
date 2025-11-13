@@ -34,7 +34,7 @@ class QueryExecutionContext(BaseModel):
 
     # Enrichment
     insights_text: Optional[str] = None
-    chart_base64: Optional[str] = None
+    chart_spec: Optional[Dict[str, Any]] = None  # Interactive chart specification (JSON)
 
     # Metadata
     started_at: Optional[datetime] = None

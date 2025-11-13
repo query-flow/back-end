@@ -30,6 +30,12 @@ from .conversation_schema import (
     AskInConversationRequest,
     AddMessageRequest,
 )
+from .suggestion_schema import (
+    SuggestionSource,
+    QuestionSuggestion,
+    SuggestionsResponse,
+    UserQueryStats,
+)
 
 __all__ = [
     "AuthedUser",
@@ -60,4 +66,8 @@ __all__ = [
     "ConversationHistoryResponse",
     "AskInConversationRequest",
     "AddMessageRequest",
+    "SuggestionSource",
+    "QuestionSuggestion",
+    "SuggestionsResponse",
+    "UserQueryStats",
 ]

@@ -7,6 +7,7 @@ from app.models.organization_model import Organization, OrgDbConnection, OrgAllo
 from app.models.document_model import BizDocument, QueryAudit
 from app.models.member_model import OrgMember
 from app.models.conversation import ClarificationSession, Conversation, ConversationMessage
+from app.models.query_history import QueryHistory
 
 __all__ = [
     "User",
@@ -19,4 +20,5 @@ __all__ = [
     "ClarificationSession",
     "Conversation",
     "ConversationMessage",
+    "QueryHistory",
 ]

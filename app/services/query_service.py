@@ -50,12 +50,14 @@ class QueryService:
         clarification_repo: ClarificationRepository,
         audit_repo: AuditRepository,
         enrichment_service: EnrichmentService,
-        conversation_repo: Optional[ConversationRepository] = None
+        conversation_repo: Optional[ConversationRepository] = None,
+        query_history_repo: Optional['QueryHistoryRepository'] = None
     ):
         self.clarification_repo = clarification_repo
         self.audit_repo = audit_repo
         self.enrichment_service = enrichment_service
         self.conversation_repo = conversation_repo
+        self.query_history_repo = query_history_repo
 
     def execute_query(
         self,
@@ -119,6 +121,15 @@ class QueryService:
                     conversation_id=conversation_id,
                     ctx=ctx,
                     result=result
+                )
+
+            # Save to query history for personalization
+            if user_id and self.query_history_repo and result.get("status") == "success":
+                self._save_to_history(
+                    user_id=user_id,
+                    org_id=org_ctx.org_id,
+                    ctx=ctx,
+                    conversation_id=conversation_id
                 )
 
             return result
@@ -508,7 +519,12 @@ class QueryService:
         # Return order: preferred first, then others
         return [preferred] + [s for s in org_ctx.allowed_schemas if s != preferred]
 
-    def _build_response(self, org_id: str, ctx: QueryExecutionContext) -> Dict[str, Any]:
+    def _build_response(
+        self,
+        org_id: str,
+        ctx: QueryExecutionContext,
+        include_suggestions: bool = True
+    ) -> Dict[str, Any]:
         """
         Build final response dict
 
@@ -519,6 +535,7 @@ class QueryService:
             "columns": ["col1", "col2"],
             "rows": [[val1, val2], ...],
             "insights": "text summary" or {"summary": "...", "chart": {...}},
+            "suggested_questions": ["question1", "question2", ...],  # NEW
             "metadata": {
                 "org_id": "uuid",
                 "row_count": 10,
@@ -541,16 +558,33 @@ class QueryService:
         }
 
         # Add insights if available
-        if ctx.insights_text or ctx.chart_base64:
+        if ctx.insights_text or ctx.chart_spec:
             response["insights"] = {
                 "summary": ctx.insights_text,
-                "chart": {
-                    "mime": "image/png",
-                    "base64": ctx.chart_base64
-                } if ctx.chart_base64 else None
+                "chart": ctx.chart_spec  # Now returns interactive chart spec (JSON)
             }
         else:
             response["insights"] = None
+
+        # Add contextual suggestions (Layer 3: smart follow-ups)
+        if include_suggestions and self.query_history_repo:
+            try:
+                from app.services.suggestion_service import SuggestionService
+                suggestion_service = SuggestionService(self.query_history_repo)
+
+                suggestions = suggestion_service.generate_contextual_suggestions(
+                    pergunta=ctx.pergunta,
+                    colunas=ctx.colunas or [],
+                    dados=ctx.dados or [],
+                    schema_used=ctx.schema_used or ""
+                )
+
+                response["suggested_questions"] = suggestions
+            except Exception as e:
+                logger.warning(f"Failed to generate suggestions: {e}")
+                response["suggested_questions"] = []
+        else:
+            response["suggested_questions"] = []
 
         return response
 
@@ -599,3 +633,36 @@ class QueryService:
 
         except Exception as e:
             logger.error(f"Failed to save to conversation: {e}", exc_info=True)
+
+    def _save_to_history(
+        self,
+        user_id: str,
+        org_id: str,
+        ctx: QueryExecutionContext,
+        conversation_id: Optional[str] = None
+    ) -> None:
+        """
+        Save query to history for personalization and analytics
+
+        Args:
+            user_id: User ID
+            org_id: Organization ID
+            ctx: Query execution context
+            conversation_id: Optional conversation ID
+        """
+        try:
+            self.query_history_repo.save_query(
+                user_id=user_id,
+                org_id=org_id,
+                pergunta=ctx.pergunta,
+                schema_used=ctx.schema_used,
+                sql_executed=ctx.sql_executed or ctx.sql_generated,
+                row_count=ctx.row_count or (len(ctx.dados) if ctx.dados else None),
+                duration_ms=ctx.duration_ms,
+                conversation_id=conversation_id
+            )
+
+            logger.info(f"Saved query to history for user {user_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to save to query history: {e}", exc_info=True)

@@ -102,7 +102,9 @@ def build_sql_generation_prompt(
 
 REGRAS OBRIGATÓRIAS:
 - Gere SOMENTE uma query SELECT válida
-- Use apenas tabelas e colunas do schema fornecido
+- Use APENAS tabelas e colunas do schema fornecido abaixo
+- NUNCA use information_schema, performance_schema, mysql.* ou outras tabelas do sistema
+- Todas as informações necessárias já estão no schema fornecido
 - Prefira JOINs com PK/FK explícitas
 - NUNCA modifique dados (sem INSERT/UPDATE/DELETE/DDL)
 - Inclua LIMIT {limit} se não houver LIMIT explícito
@@ -147,6 +149,8 @@ def build_sql_correction_prompt(
 
 REGRAS:
 - Retorne APENAS o SQL corrigido (uma única query)
+- Use APENAS tabelas do schema fornecido
+- NUNCA use information_schema, performance_schema ou outras tabelas do sistema
 - Sem múltiplos statements (sem vários ponto-e-vírgulas)
 - Sem explicações
 - Sem comentários

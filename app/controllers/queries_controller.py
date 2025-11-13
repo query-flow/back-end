@@ -122,25 +122,31 @@ async def perguntar_org_stream(
     enrichment_service = EnrichmentService()
     conversation_repo = ConversationRepository(db) if p.conversation_id else None
 
+    from app.repositories.query_history_repository import QueryHistoryRepository
+    query_history_repo = QueryHistoryRepository(db)
+
     query_service = QueryService(
         clarification_repo=clarification_repo,
         audit_repo=audit_repo,
         enrichment_service=enrichment_service,
-        conversation_repo=conversation_repo
+        conversation_repo=conversation_repo,
+        query_history_repo=query_history_repo
     )
 
     # 5. Create event queue for streaming
     event_queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+    loop = asyncio.get_event_loop()
 
     def emit_event(event: StreamEvent):
-        """Callback to emit events from sync code"""
-        asyncio.create_task(event_queue.put(event))
+        """Callback to emit events from sync code running in thread"""
+        logger.info(f"[SSE Emit] stage={event.stage}, progress={event.progress}, message={event.message}")
+        # Use call_soon_threadsafe since this is called from executor thread
+        loop.call_soon_threadsafe(event_queue.put_nowait, event)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         """Generate SSE events"""
         try:
             # Start query execution in background
-            loop = asyncio.get_event_loop()
 
             async def execute_in_thread():
                 """Run sync query execution in thread pool"""

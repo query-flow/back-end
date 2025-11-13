@@ -45,14 +45,21 @@ def proteger_sql_singledb(
             return parts[0].lower(), parts[1].lower()
         return None, parts[0].lower()
 
+    # System schemas that are allowed (read-only metadata)
+    SYSTEM_SCHEMAS = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+
     other_dbs: Set[str] = set()
     tables_used: Set[str] = set()
 
     for ref in refs:
         db, tb = split_ref(ref)
         if db and db != db_name.lower():
-            other_dbs.add(db)
-        tables_used.add(tb)
+            # Allow system schemas, block other databases
+            if db not in SYSTEM_SCHEMAS:
+                other_dbs.add(db)
+        # Only validate tables from the current database (not system schemas)
+        if not db or db == db_name.lower():
+            tables_used.add(tb)
 
     if other_dbs:
         raise HTTPException(

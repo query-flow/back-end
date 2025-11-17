@@ -46,7 +46,7 @@ class ConversationHistoryResponse(BaseModel):
 class AskInConversationRequest(BaseModel):
     """Ask a question within an existing conversation"""
     pergunta: str
-    max_linhas: int = 100
+    max_linhas: int = 10
     enrich: bool = True
 
 

@@ -20,6 +20,7 @@ from app.repositories.clarification_repository import ClarificationRepository
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.services.enrichment_service import EnrichmentService
+from app.services.chart_service import ChartService
 from app.pipeline.stages import (
     analyze_intent,
     generate_sql,
@@ -271,6 +272,23 @@ class QueryService:
             # Execute with retry
             self._execute_sql_with_retry(conn, sql, esquema_txt, catalog, schema, ctx)
 
+        # Generate chart configuration if we have data
+        if ctx.dados and len(ctx.dados) > 0:
+            try:
+                chart_service = ChartService()
+                chart_config = chart_service.generate_chart_config(
+                    columns=ctx.colunas or [],
+                    data=ctx.dados[:10],  # Send first 10 rows for efficiency
+                    question=ctx.pergunta,
+                    chart_hint=None
+                )
+                ctx.chart_config = chart_config
+                logger.info(f"Generated chart config: type={chart_config.get('type')}")
+            except Exception as e:
+                logger.warning(f"Failed to generate chart: {e}")
+                # Don't fail the query if chart generation fails
+                ctx.chart_config = None
+
         # Enrich if requested
         if ctx.enrich:
             # Emit enrichment event
@@ -380,6 +398,23 @@ class QueryService:
 
             # Execute with retry
             self._execute_sql_with_retry(conn, sql, esquema_txt, catalog, schema, ctx)
+
+        # Generate chart configuration if we have data
+        if ctx.dados and len(ctx.dados) > 0:
+            try:
+                chart_service = ChartService()
+                chart_config = chart_service.generate_chart_config(
+                    columns=ctx.colunas or [],
+                    data=ctx.dados[:10],  # Send first 10 rows for efficiency
+                    question=ctx.pergunta,
+                    chart_hint=None
+                )
+                ctx.chart_config = chart_config
+                logger.info(f"Generated chart config: type={chart_config.get('type')}")
+            except Exception as e:
+                logger.warning(f"Failed to generate chart: {e}")
+                # Don't fail the query if chart generation fails
+                ctx.chart_config = None
 
         # Enrich if requested
         if ctx.enrich:
@@ -565,6 +600,10 @@ class QueryService:
             }
         else:
             response["insights"] = None
+
+        # Add LLM-generated chart config if available
+        if ctx.chart_config:
+            response["chart_config"] = ctx.chart_config
 
         # Add contextual suggestions (Layer 3: smart follow-ups)
         if include_suggestions and self.query_history_repo:

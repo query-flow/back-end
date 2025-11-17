@@ -3,6 +3,7 @@ Query History Model - Track user queries for analytics and personalization
 """
 from typing import Optional
 from datetime import datetime
+from sqlalchemy import Column, Text
 from sqlmodel import SQLModel, Field
 
 
@@ -25,9 +26,9 @@ class QueryHistory(SQLModel, table=True):
     id: str = Field(primary_key=True)  # UUID
     user_id: str = Field(foreign_key="users.id", index=True)
     org_id: str = Field(foreign_key="orgs.id", index=True)
-    pergunta: str  # Natural language question
+    pergunta: str = Field(sa_column=Column(Text))  # Natural language question (TEXT)
     schema_used: Optional[str] = None  # Which schema was queried
-    sql_executed: Optional[str] = None  # Generated SQL
+    sql_executed: Optional[str] = Field(default=None, sa_column=Column(Text))  # Generated SQL (MEDIUMTEXT)
     row_count: Optional[int] = None  # Number of rows returned
     duration_ms: Optional[int] = None  # Execution time
     conversation_id: Optional[str] = Field(default=None, foreign_key="conversations.id")  # Optional conversation context

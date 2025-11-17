@@ -14,6 +14,7 @@ from app.controllers import (
     queries_controller,
     conversations_controller,
     suggestions_controller,
+    chart_controller,
 )
 
 # Create FastAPI app
@@ -35,6 +36,7 @@ app.include_router(members_controller.router)  # Member management (admin only)
 app.include_router(queries_controller.router)
 app.include_router(conversations_controller.router)  # Conversation management
 app.include_router(suggestions_controller.router)  # Query suggestions
+app.include_router(chart_controller.router)  # Chart generation
 app.include_router(documents_controller.router)
 
 

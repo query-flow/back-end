@@ -1,0 +1,598 @@
+{
+  "info": {
+    "name": "NL→SQL API - Self-Service",
+    "description": "API de NL→SQL com fluxo linear e self-service\n\n🚀 INÍCIO RÁPIDO:\n1️⃣ COMEÇAR: Register → Cria usuário + org automaticamente (você vira admin)\n2️⃣ CONFIGURAR: Upload documentos com contexto de negócio\n3️⃣ CONVIDAR: (Opcional) Convide membros para sua org\n4️⃣ FAZER PERGUNTAS: Use linguagem natural para consultar dados\n\n📌 Cada request salva variáveis automaticamente (tokens, IDs, etc)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1️⃣ COMEÇAR",
+      "description": "Criar conta e fazer login",
+      "item": [
+        {
+          "name": "Register (criar usuário + org)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var response = pm.response.json();",
+                  "    pm.environment.set('token', response.access_token);",
+                  "    pm.environment.set('user_id', response.user_id);",
+                  "    pm.environment.set('org_id', response.org_id);",
+                  "    console.log('✅ Usuário criado! Token, user_id e org_id salvos');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"João Silva\",\n  \"email\": \"joao@empresa.com\",\n  \"password\": \"senha12345\",\n  \"org_name\": \"Minha Empresa\",\n  \"db_host\": \"localhost\",\n  \"db_port\": 3306,\n  \"db_name\": \"sakila\",\n  \"db_user\": \"root\",\n  \"db_password\": \"insper\",\n  \"allowed_schemas\": [\"sakila\"]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "register"]
+            }
+          },
+          "description": "Cria usuário + organização automaticamente. Você se torna admin da org."
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var response = pm.response.json();",
+                  "    pm.environment.set('token', response.access_token);",
+                  "    pm.environment.set('user_id', response.user_id);",
+                  "    console.log('✅ Login OK! Token salvo');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"joao@empresa.com\",\n  \"password\": \"senha12345\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "login"]
+            }
+          },
+          "description": "Login com email + senha."
+        }
+      ]
+    },
+    {
+      "name": "2️⃣ CONFIGURAR SUA ORG",
+      "description": "Upload de documentos com contexto de negócio",
+      "item": [
+        {
+          "name": "Criar Documento",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var response = pm.response.json();",
+                  "    pm.environment.set('doc_id', response.doc_id);",
+                  "    console.log('✅ Documento criado! doc_id salvo');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"titulo\": \"Dicionário de Dados\",\n  \"conteudo\": \"Database Sakila: DVD rental store. Tabelas principais: film, actor, customer, rental\",\n  \"tipo\": \"data_dictionary\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/documents",
+              "host": ["{{base_url}}"],
+              "path": ["documents"]
+            }
+          },
+          "description": "Criar documento de contexto (dicionário de dados, regras de negócio, etc)."
+        },
+        {
+          "name": "Upload Documento (PDF/DOCX/TXT)",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "title", "value": "Manual de Processos", "type": "text"},
+                {"key": "file", "type": "file", "src": []}
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/documents/extract",
+              "host": ["{{base_url}}"],
+              "path": ["documents", "extract"]
+            }
+          },
+          "description": "Upload de arquivo com extração automática de texto via LLM."
+        },
+        {
+          "name": "Listar Documentos",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/documents",
+              "host": ["{{base_url}}"],
+              "path": ["documents"]
+            }
+          },
+          "description": "Listar todos os documentos da sua organização."
+        },
+        {
+          "name": "Deletar Documento",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/documents/{{doc_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["documents", "{{doc_id}}"]
+            }
+          },
+          "description": "Deletar um documento."
+        }
+      ]
+    },
+    {
+      "name": "3️⃣ CONVIDAR MEMBROS (opcional)",
+      "description": "Gerenciar membros da sua organização (requer role='admin')",
+      "item": [
+        {
+          "name": "Convidar Membro",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var response = pm.response.json();",
+                  "    pm.environment.set('invite_token', response.invite_token);",
+                  "    pm.environment.set('invited_user_id', response.user_id);",
+                  "    console.log('✅ Convite criado! invite_token salvo: ' + response.invite_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"maria@empresa.com\",\n  \"name\": \"Maria Santos\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/members/invite",
+              "host": ["{{base_url}}"],
+              "path": ["members", "invite"]
+            }
+          },
+          "description": "Convidar novo membro (somente admin). Gera invite_token válido por 7 dias."
+        },
+        {
+          "name": "Accept Invite",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var response = pm.response.json();",
+                  "    pm.environment.set('member_token', response.access_token);",
+                  "    console.log('✅ Convite aceito! Token do membro salvo');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"invite_token\": \"{{invite_token}}\",\n  \"password\": \"senha12345\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/accept-invite",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "accept-invite"]
+            }
+          },
+          "description": "Membro convidado aceita convite e define senha."
+        },
+        {
+          "name": "Listar Membros",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/members",
+              "host": ["{{base_url}}"],
+              "path": ["members"]
+            }
+          },
+          "description": "Listar todos os membros da organização."
+        },
+        {
+          "name": "Atualizar Role (member ↔ admin)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role_in_org\": \"admin\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/members/{{invited_user_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["members", "{{invited_user_id}}"]
+            }
+          },
+          "description": "Admin pode promover member → admin ou rebaixar admin → member."
+        },
+        {
+          "name": "Remover Membro",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/members/{{invited_user_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["members", "{{invited_user_id}}"]
+            }
+          },
+          "description": "Admin pode remover membro da organização."
+        }
+      ]
+    },
+    {
+      "name": "4️⃣ FAZER PERGUNTAS",
+      "description": "Consultar dados usando linguagem natural",
+      "item": [
+        {
+          "name": "Pergunta Simples (SQL + Dados)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pergunta\": \"Quais são os 5 atores que aparecem em mais filmes?\",\n  \"max_linhas\": 5,\n  \"enrich\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/perguntar_org",
+              "host": ["{{base_url}}"],
+              "path": ["perguntar_org"]
+            }
+          },
+          "description": "Pergunta simples: retorna SQL + dados."
+        },
+        {
+          "name": "Pergunta com Insights (SQL + BI + Gráfico)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pergunta\": \"Quais são os 5 atores que aparecem em mais filmes?\",\n  \"max_linhas\": 5,\n  \"enrich\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/perguntar_org",
+              "host": ["{{base_url}}"],
+              "path": ["perguntar_org"]
+            }
+          },
+          "description": "Pergunta enriquecida: SQL + dados + insights de BI + gráfico (matplotlib)."
+        },
+        {
+          "name": "Pergunta em Conversa (com contexto)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pergunta\": \"Quantos são da categoria Action?\",\n  \"max_linhas\": 100,\n  \"enrich\": false,\n  \"conversation_id\": \"{{conversation_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/perguntar_org",
+              "host": ["{{base_url}}"],
+              "path": ["perguntar_org"]
+            }
+          },
+          "description": "Pergunta com contexto de conversa anterior. Sistema carrega histórico para entender referências."
+        },
+        {
+          "name": "Pergunta com Streaming (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Accept", "value": "text/event-stream"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pergunta\": \"Quantos clientes temos?\",\n  \"max_linhas\": 100,\n  \"enrich\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/perguntar_org_stream",
+              "host": ["{{base_url}}"],
+              "path": ["perguntar_org_stream"]
+            }
+          },
+          "description": "Streaming com Server-Sent Events (SSE). Retorna eventos de progresso em tempo real.\nNOTA: Postman mostra eventos concatenados. Use cURL ou browser para ver stream real."
+        }
+      ]
+    },
+    {
+      "name": "5️⃣ CONVERSAS PERSISTENTES",
+      "description": "Gerenciar conversas com histórico e contexto",
+      "item": [
+        {
+          "name": "Criar Conversa",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var response = pm.response.json();",
+                  "    pm.environment.set('conversation_id', response.id);",
+                  "    console.log('✅ Conversa criada! conversation_id salvo: ' + response.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Análise de Vendas Q4\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/conversations",
+              "host": ["{{base_url}}"],
+              "path": ["conversations"]
+            }
+          },
+          "description": "Criar nova conversa. Título é opcional, será auto-gerado na primeira pergunta."
+        },
+        {
+          "name": "Listar Conversas",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/conversations?limit=50&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["conversations"],
+              "query": [
+                {"key": "limit", "value": "50"},
+                {"key": "offset", "value": "0"}
+              ]
+            }
+          },
+          "description": "Listar todas as conversas do usuário, ordenadas por data de atualização."
+        },
+        {
+          "name": "Ver Histórico da Conversa",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/conversations/{{conversation_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["conversations", "{{conversation_id}}"]
+            }
+          },
+          "description": "Ver histórico completo de mensagens da conversa (perguntas + respostas)."
+        },
+        {
+          "name": "Fazer Pergunta na Conversa",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pergunta\": \"Quantos filmes temos no catálogo?\",\n  \"max_linhas\": 100,\n  \"enrich\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/conversations/{{conversation_id}}/ask",
+              "host": ["{{base_url}}"],
+              "path": ["conversations", "{{conversation_id}}", "ask"]
+            }
+          },
+          "description": "Fazer pergunta dentro de uma conversa. Sistema carrega histórico automaticamente para contexto."
+        },
+        {
+          "name": "Deletar Conversa",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/conversations/{{conversation_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["conversations", "{{conversation_id}}"]
+            }
+          },
+          "description": "Deletar conversa e todas suas mensagens."
+        }
+      ]
+    },
+    {
+      "name": "6️⃣ UTILITÁRIOS",
+      "description": "Ferramentas auxiliares",
+      "item": [
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var response = pm.response.json();",
+                  "    pm.environment.set('token', response.access_token);",
+                  "    console.log('✅ Token renovado!');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/refresh",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "refresh"]
+            }
+          },
+          "description": "Renovar access_token usando refresh_token (válido por 30 dias)."
+        },
+        {
+          "name": "Debug: Ver Meu Perfil",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+            "url": {
+              "raw": "{{base_url}}/auth/debug/me",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "debug", "me"]
+            }
+          },
+          "description": "Ver informações do usuário autenticado (debug)."
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.environment.get('base_url')) {",
+          "    pm.environment.set('base_url', 'http://localhost:8000');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string",
+      "description": "JWT token (salvo automaticamente)"
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "type": "string",
+      "description": "ID do usuário logado"
+    },
+    {
+      "key": "org_id",
+      "value": "",
+      "type": "string",
+      "description": "ID da organização"
+    },
+    {
+      "key": "invite_token",
+      "value": "",
+      "type": "string",
+      "description": "Token de convite"
+    },
+    {
+      "key": "invited_user_id",
+      "value": "",
+      "type": "string",
+      "description": "ID do usuário convidado"
+    },
+    {
+      "key": "doc_id",
+      "value": "",
+      "type": "string",
+      "description": "ID do documento"
+    },
+    {
+      "key": "member_token",
+      "value": "",
+      "type": "string",
+      "description": "Token do membro convidado"
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "string",
+      "description": "Refresh token (válido por 30 dias)"
+    },
+    {
+      "key": "conversation_id",
+      "value": "",
+      "type": "string",
+      "description": "ID da conversa ativa (salvo automaticamente)"
+    }
+  ]
+}

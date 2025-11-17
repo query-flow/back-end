@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def generate_sql(
     pergunta: str,
     esquema: str,
-    limit: int = 100
+    limit: int = 10
 ) -> str:
     """
     Generate SQL from natural language
@@ -29,7 +29,7 @@ def generate_sql(
 
     Returns SQL string
     """
-    logger.info(f"Generating SQL for: '{pergunta[:50]}...'")
+    logger.info(f"Generating SQL for: '{pergunta[:50]}...' with LIMIT={limit}")
 
     # Step 1: Build prompt
     messages = build_sql_generation_prompt(pergunta, esquema, limit)
@@ -49,7 +49,7 @@ def correct_sql(
     sql_original: str,
     erro: str,
     esquema: str,
-    limit: int = 100
+    limit: int = 10
 ) -> str:
     """
     Correct SQL that failed execution
@@ -80,7 +80,7 @@ def correct_sql(
 async def generate_sql_parallel(
     pergunta: str,
     esquema: str,
-    limit: int = 100
+    limit: int = 10
 ) -> str:
     """
     Generate SQL with self-consistency (parallel voting)
@@ -95,7 +95,7 @@ async def generate_sql_parallel(
     from app.dtos.query import SQLCandidate, ValidationResult
     from app.pipeline.stages.sql_validator import select_best_candidate
 
-    logger.info(f"Generating SQL with self-consistency for: '{pergunta[:50]}...'")
+    logger.info(f"Generating SQL with self-consistency for: '{pergunta[:50]}...' with LIMIT={limit}")
 
     # Prepare prompts
     sql_prompt = build_sql_generation_prompt(pergunta, esquema, limit)

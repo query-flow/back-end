@@ -36,6 +36,11 @@ from .suggestion_schema import (
     SuggestionsResponse,
     UserQueryStats,
 )
+from .chart_schema import (
+    GenerateChartRequest,
+    RegenerateChartRequest,
+    ChartConfigResponse,
+)
 
 __all__ = [
     "AuthedUser",
@@ -70,4 +75,7 @@ __all__ = [
     "QuestionSuggestion",
     "SuggestionsResponse",
     "UserQueryStats",
+    "GenerateChartRequest",
+    "RegenerateChartRequest",
+    "ChartConfigResponse",
 ]

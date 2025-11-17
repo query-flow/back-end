@@ -14,7 +14,7 @@ class QueryExecutionContext(BaseModel):
     """
     # Input
     pergunta: str
-    max_linhas: int = 100
+    max_linhas: int = 10
     enrich: bool = False
     clarification_id: Optional[str] = None
     clarifications: Optional[Dict[str, Any]] = None
@@ -35,6 +35,7 @@ class QueryExecutionContext(BaseModel):
     # Enrichment
     insights_text: Optional[str] = None
     chart_spec: Optional[Dict[str, Any]] = None  # Interactive chart specification (JSON)
+    chart_config: Optional[Dict[str, Any]] = None  # LLM-generated chart config (SimpleChart format)
 
     # Metadata
     started_at: Optional[datetime] = None

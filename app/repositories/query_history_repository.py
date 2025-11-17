@@ -44,26 +44,31 @@ class QueryHistoryRepository:
         Returns:
             Created QueryHistory
         """
-        history = QueryHistory(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            org_id=org_id,
-            pergunta=pergunta,
-            schema_used=schema_used,
-            sql_executed=sql_executed,
-            row_count=row_count,
-            duration_ms=duration_ms,
-            conversation_id=conversation_id,
-            created_at=datetime.utcnow()
-        )
+        try:
+            history = QueryHistory(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                org_id=org_id,
+                pergunta=pergunta,
+                schema_used=schema_used,
+                sql_executed=sql_executed,
+                row_count=row_count,
+                duration_ms=duration_ms,
+                conversation_id=conversation_id,
+                created_at=datetime.utcnow()
+            )
 
-        self.session.add(history)
-        self.session.commit()
-        self.session.refresh(history)
+            self.session.add(history)
+            self.session.commit()
+            self.session.refresh(history)
 
-        logger.info(f"Saved query history {history.id} for user {user_id}")
+            logger.info(f"Saved query history {history.id} for user {user_id}")
 
-        return history
+            return history
+        except Exception as e:
+            logger.error(f"Failed to save query history: {e}")
+            self.session.rollback()
+            raise
 
     def get_user_recent_queries(
         self,

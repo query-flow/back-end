@@ -102,13 +102,26 @@ def build_sql_generation_prompt(
 
 REGRAS OBRIGATÓRIAS:
 - Gere SOMENTE uma query SELECT válida
-- Use APENAS tabelas e colunas do schema fornecido abaixo
+- Use APENAS tabelas e colunas do schema fornecido abaixo (copie os nomes EXATAMENTE como aparecem, incluindo acentos e underscores)
+- NUNCA invente nomes de colunas - use EXATAMENTE os nomes que estão no schema
 - NUNCA use information_schema, performance_schema, mysql.* ou outras tabelas do sistema
 - Todas as informações necessárias já estão no schema fornecido
-- Prefira JOINs com PK/FK explícitas
+- Prefira JOINs com PK/FK explícitas (use as colunas exatas mostradas em [FK: ...])
 - NUNCA modifique dados (sem INSERT/UPDATE/DELETE/DDL)
-- Inclua LIMIT {limit} se não houver LIMIT explícito
+- ⚠️ SEMPRE termine com LIMIT {limit} (use EXATAMENTE {limit}, não outro valor)
 - Responda APENAS com o SQL, sem explicações
+
+⭐ REGRA IMPORTANTE - NOMES LEGÍVEIS:
+- SEMPRE que retornar códigos (IDs, códigos, chaves), faça JOIN com tabelas relacionadas para trazer NOMES
+- Exemplos:
+  ✅ SELECT p.nome AS produto, SUM(v.quantidade) FROM vendas v JOIN produtos p ON v.produto_id = p.id
+  ❌ SELECT produto_id, SUM(quantidade) FROM vendas  (mostra código ao invés de nome)
+
+  ✅ SELECT m.produto AS medicamento, COUNT(*) FROM compras c JOIN medicamentos m ON c.medicamento_codigo = m.codigo
+  ❌ SELECT medicamento_codigo, COUNT(*) FROM compras  (mostra código ao invés de nome)
+
+- Se houver FK (foreign key) apontando para outra tabela, SEMPRE faça JOIN para trazer a descrição/nome
+- Use alias descritivos (AS produto, AS cliente, AS medicamento) para facilitar leitura
 
 FORMATO DE RESPOSTA:
 - Uma única query SQL
@@ -154,7 +167,7 @@ REGRAS:
 - Sem múltiplos statements (sem vários ponto-e-vírgulas)
 - Sem explicações
 - Sem comentários
-- Inclua LIMIT {limit} se necessário
+- ⚠️ SEMPRE termine com LIMIT {limit} (use EXATAMENTE {limit}, não outro valor)
 
 EXEMPLO CORRETO:
 SELECT coluna FROM tabela WHERE condicao LIMIT 10;

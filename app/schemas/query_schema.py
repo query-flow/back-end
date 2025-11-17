@@ -4,7 +4,7 @@ from typing import Optional
 
 class PerguntaOrg(BaseModel):
     pergunta: str
-    max_linhas: int = 100
+    max_linhas: int = 10
     enrich: bool = True
 
     # For clarification flow
@@ -18,4 +18,4 @@ class PerguntaOrg(BaseModel):
 class PerguntaDireta(BaseModel):
     database_url: str
     pergunta: str
-    max_linhas: int = 100
+    max_linhas: int = 10

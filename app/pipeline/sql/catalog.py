@@ -63,11 +63,20 @@ def catalog_for_current_db(conn: Connection, db_name: str) -> Dict[str, Any]:
 def esquema_resumido(catalog: Dict[str, Any], max_chars: int = 4000) -> str:
     """
     Generate a summarized schema description for LLM context
+    Includes columns, types, and foreign key relationships
     """
     linhas: List[str] = []
     for t, meta in catalog["tables"].items():
+        # Format columns (limit to 24 to avoid token overflow)
         cols = ", ".join([f'{c["name"]}:{c["type"]}' for c in meta["columns"]][:24])
-        linhas.append(f"- {t}({cols})")
+
+        # Add foreign keys info if present
+        fk_info = ""
+        if meta.get("fks"):
+            fks = [f'{fk["col"]}→{fk["ref_table"]}.{fk["ref_col"]}' for fk in meta["fks"][:5]]
+            fk_info = f' [FK: {", ".join(fks)}]'
+
+        linhas.append(f"- {t}({cols}){fk_info}")
 
     texto = "Esquema disponível:\n" + "\n".join(linhas)
     return texto[:max_chars]
